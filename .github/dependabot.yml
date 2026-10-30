@@ -1,0 +1,25 @@
+# Keeps pinned action SHAs and locked Python deps current. PRs go through the
+# same CI gates as any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]

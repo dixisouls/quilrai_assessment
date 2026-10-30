@@ -1,0 +1,19 @@
+# Gitleaks config: the full default ruleset plus ONE narrow allowlist.
+#
+# The redaction tests need realistic-looking fake credentials to prove they
+# get masked. They are allowlisted by value *and* path (condition = AND), so a
+# real key anywhere, including in tests, still fails the scan.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic credentials used as redaction test fixtures"
+condition = "AND"
+paths = ['''^(common|scripts|task\d[^/]*|e2e)/tests/''']
+regexTarget = "match"
+regexes = [
+  '''AbCdEf0123456789''',                 # fake provider API keys
+  '''c2lnbmF0dXJlX2J5dGVz''',             # base64("signature_bytes") in a fake JWT
+  '''eyJzdWIiOiJ1c2VyIn0''',              # base64('{"sub":"user"}') in a fake JWT
+]
