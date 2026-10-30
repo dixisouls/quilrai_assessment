@@ -3,7 +3,7 @@ name = "quilr-assessment"
 version = "0.1.0"
 description = "QuilrAI assessment: MCP server, MCP security gateway, LLM gateway guardrails and routing"
 requires-python = ">=3.12,<3.13"
-dependencies = ["quilr-common"]
+dependencies = ["quilr-common", "task1-mcp-server"]
 
 [dependency-groups]
 dev = [
@@ -23,16 +23,17 @@ package = false
 required-version = "==0.13.6"
 
 [tool.uv.workspace]
-members = ["common"]
+members = ["common", "task1_mcp_server"]
 
 [tool.uv.sources]
 quilr-common = { workspace = true }
+task1-mcp-server = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["common/tests", "scripts/tests"]
+testpaths = ["common/tests", "scripts/tests", "task1_mcp_server/tests"]
 pythonpath = ["scripts"]
 markers = [
     "live: hits real external providers; skipped unless the relevant API key is set",
@@ -42,7 +43,7 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
-source = ["quilr_common", "scripts"]
+source = ["quilr_common", "scripts", "task1_mcp_server"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]
@@ -61,7 +62,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "SIM", "RET", "PTH
 ignore = ["TRY003", "PLR0913"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["quilr_common", "check_bidi", "check_commits"]
+known-first-party = ["quilr_common", "task1_mcp_server", "check_bidi", "check_commits"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is the pytest idiom; magic values are fine in test expectations.
@@ -70,8 +71,8 @@ known-first-party = ["quilr_common", "check_bidi", "check_commits"]
 
 [tool.mypy]
 strict = true
-files = ["common/src", "common/tests", "scripts"]
-mypy_path = "common/src:scripts"
+files = ["common/src", "common/tests", "scripts", "task1_mcp_server/src", "task1_mcp_server/tests"]
+mypy_path = "common/src:task1_mcp_server/src:scripts"
 explicit_package_bases = true
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
