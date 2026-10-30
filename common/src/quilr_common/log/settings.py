@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,5 +34,8 @@ class LoggingSettings(BaseSettings):
     # When set, audit events are also appended to this tamper-evident file.
     audit_path: Path | None = None
     audit_fsync: bool = True
+    # HMAC key for the audit chain. Without it the chain only detects accidental
+    # corruption (see quilr_common.log.audit). Required in production.
+    audit_hmac_key: SecretStr | None = Field(default=None, min_length=32)
     # Per-field cap; bounds log volume from hostile or runaway inputs.
     max_field_chars: int = Field(default=8192, ge=256, le=1_000_000)
