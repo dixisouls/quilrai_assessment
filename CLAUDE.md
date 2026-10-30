@@ -36,6 +36,10 @@ fail closed, auditable, low latency, and honest about its limits.**
 
 ## 2. Non-negotiable working rules
 
+0. **Delivery routine: follow `CONTRIBUTING.md`.** Branch per task
+   (`task/N-<slug>`), small commits, CI green, then a **fresh independent
+   reviewer agent** (no shared context) reviews the diff before the PR. Fix the
+   findings, then merge into `main` via PR. Never commit to `main` directly.
 1. **Part by part.** One task at a time, in order. At the end of each task: all
    tests green, README written, mistakes logged, then **stop and hand back to the
    user for review** before starting the next task.
@@ -234,7 +238,8 @@ compose into one system with a real end-to-end path:
 
 - [ ] All requirements in `ASSESSMENT.md` for the task are met, line by line.
 - [ ] Unit + integration + security-negative tests written and passing.
-- [ ] `ruff`, `mypy --strict`, `pip-audit` clean.
+- [ ] `make check` clean locally; all CI checks green on the branch.
+- [ ] Independent reviewer agent run; findings fixed or rebutted.
 - [ ] Ran it for real (not only tests) and captured the output in the README.
 - [ ] README complete, including "why this approach".
 - [ ] `MISTAKES.md` updated.
