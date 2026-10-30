@@ -140,3 +140,37 @@ def test_cli_range_mode_against_real_repo(tmp_path: Path) -> None:
     assert main(["--range", f"{base}..HEAD", "--repo", str(tmp_path)]) == 0
     git("commit", "-q", "--allow-empty", "-m", "bad message", "-m", "Co-Authored-By: Claude <x@y>")
     assert main(["--range", f"{base}..HEAD", "--repo", str(tmp_path)]) == 1
+
+
+# --- Review findings ------------------------------------------------------------
+
+
+def test_hash_prefixed_header_is_content_in_range_mode() -> None:
+    # In --range mode messages come from git log: '#' lines are real content.
+    errors = check_message("#42 fix thing\n", strip_comments=False)
+    assert errors != ["empty commit message"]
+    assert any("header" in e for e in errors)
+
+
+def test_verbose_commit_scissors_section_is_ignored() -> None:
+    msg = (
+        "feat(common): add thing\n\n"
+        "Body.\n"
+        "# ------------------------ >8 ------------------------\n"
+        "# Do not modify or remove the line above.\n"
+        "diff --git a/x b/x\n" + "+" + "y" * 150 + "\n"
+    )
+    assert check_message(msg) == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "build(deps): bump the py group across 1 directory with 12 updates",
+        "build(deps-dev): bump the py group across 1 directory with 12 updates",
+        "ci(deps): bump the actions group across 1 directory with 3 updates",
+        "build(deps): bump pydantic-settings from 2.16.2 to 2.17.0",
+    ],
+)
+def test_dependabot_titles_fit_the_policy(header: str) -> None:
+    assert check_message(header + "\n") == []

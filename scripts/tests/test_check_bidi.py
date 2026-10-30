@@ -44,3 +44,8 @@ def test_cli_reports_and_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str
     out = capsys.readouterr().out
     assert "bad.py:1:6" in out
     assert "U+2067" in out
+
+
+@pytest.mark.parametrize("codepoint", [0x200C, 0x200D, 0x00AD, 0x180E, 0x2061, 0x2064])
+def test_other_invisible_characters_are_detected(codepoint: int) -> None:
+    assert codepoint in DANGEROUS

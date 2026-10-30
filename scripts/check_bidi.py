@@ -1,9 +1,13 @@
-"""Fail if any text file contains invisible bidi / zero-width control characters.
+"""Fail if any text file contains invisible bidi / zero-width / format characters.
 
 These enable "Trojan Source" attacks (CVE-2021-42574), where code renders
 differently from how it executes, e.g. hiding a security check inside what
 looks like a string. They also slipped into this repo once by accident
 (see MISTAKES.md C1). Write them as escapes such as ``\\u202e`` instead.
+
+Scope: UTF-8 text. Files containing NUL bytes (binaries, UTF-16) are skipped.
+ZWJ (U+200D) is flagged too, so compound emoji such as family sequences
+can't be used in tracked files. That is an accepted trade-off.
 
 Usage: ``python scripts/check_bidi.py [FILE ...]`` (default: all git-tracked files).
 """
@@ -24,6 +28,11 @@ DANGEROUS: Final = frozenset(
         0x200F,  # RIGHT-TO-LEFT MARK
         0x061C,  # ARABIC LETTER MARK
         0x200B,  # ZERO WIDTH SPACE
+        0x200C,  # ZERO WIDTH NON-JOINER
+        0x200D,  # ZERO WIDTH JOINER
+        0x00AD,  # SOFT HYPHEN
+        0x180E,  # MONGOLIAN VOWEL SEPARATOR
+        *range(0x2061, 0x2065),  # invisible math operators
         0x2060,  # WORD JOINER
         0xFEFF,  # ZERO WIDTH NO-BREAK SPACE (allowed only as a leading BOM)
     }

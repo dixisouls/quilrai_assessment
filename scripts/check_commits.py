@@ -7,6 +7,9 @@
 * No AI-tool attribution (``Co-Authored-By: Claude``, "Generated with ...").
   Work in this repo is submitted under the author's name.
 * Git-generated ``Merge ...`` and ``Revert "..."`` messages are accepted.
+* In ``--file`` mode (commit-msg hook) ``#`` comment lines and everything below
+  the ``git commit -v`` scissors line are ignored, as git itself does. In
+  ``--range`` mode messages come from history, so ``#`` lines are content.
 
 Usage:
     python scripts/check_commits.py --file .git/COMMIT_EDITMSG   # commit-msg hook
@@ -44,6 +47,7 @@ _HEADER = re.compile(
     rf"^(?:{'|'.join(TYPES)})(?:\([a-z0-9][a-z0-9-]*\))?!?: \S(?:.*\S)?$",
 )
 _GIT_GENERATED = re.compile(r"^(?:Merge (?:pull request|branch|remote-tracking branch) |Revert \")")
+_SCISSORS = "# ------------------------ >8 ------------------------"
 _AI_NAMES = r"(?:claude|anthropic|copilot|chatgpt|openai|gemini|cursor|codex)"
 _AI_ATTRIBUTION = (
     re.compile(rf"(?im)^\s*(?:co-authored-by|signed-off-by|generated-by):.*{_AI_NAMES}"),
@@ -52,9 +56,17 @@ _AI_ATTRIBUTION = (
 )
 
 
-def check_message(message: str) -> list[str]:
-    """Return a list of policy violations (empty means OK)."""
-    lines = [ln for ln in message.splitlines() if not ln.startswith("#")]
+def check_message(message: str, *, strip_comments: bool = True) -> list[str]:
+    """Return a list of policy violations (empty means OK).
+
+    ``strip_comments`` mirrors git's ``--cleanup=strip`` for messages still in
+    the editor; disable it for messages read back from history.
+    """
+    lines = message.splitlines()
+    if strip_comments:
+        if _SCISSORS in lines:
+            lines = lines[: lines.index(_SCISSORS)]
+        lines = [ln for ln in lines if not ln.startswith("#")]
     while lines and not lines[-1].strip():
         lines.pop()
     if not lines or not lines[0].strip():
@@ -106,6 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path(), help="repository path")
     args = parser.parse_args(argv)
 
+    strip_comments = args.file is not None
     if args.file is not None:
         targets = [("(commit message)", args.file.read_text(encoding="utf-8"))]
     else:
@@ -113,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     failed = False
     for sha, message in targets:
-        for error in check_message(message):
+        for error in check_message(message, strip_comments=strip_comments):
             failed = True
             sys.stdout.write(f"{sha[:12]}: {error}\n")
     return 1 if failed else 0
