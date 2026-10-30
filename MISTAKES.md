@@ -84,8 +84,10 @@ Format: **what happened → root cause → fix → prevention.**
 
 A fresh reviewer agent with no shared context reviewed the foundations and CI.
 It raised 18 findings (3 HIGH, 7 MEDIUM, 8 LOW), each with a reproduction. The
-tooling findings are fixed on `chore/ci-setup`. The shared-library findings
-are fixed on `fix/common-review-findings` (entries below).
+tooling findings are fixed on `chore/ci-setup`. The 13 shared-library
+findings are **not fixed yet**: they are deferred and assigned in
+`BACKLOG.md`. (A fix branch was started out of order, without the user's
+go-ahead, and then discarded; see R3.)
 
 ### R1 — Commit checker treated history `#` lines as comments and ignored `git commit -v`
 - **What happened:** in `--range` mode, a header such as `#42 fix …` was
@@ -108,3 +110,119 @@ are fixed on `fix/common-review-findings` (entries below).
   with tests asserting the titles pass the policy.
 - **Prevention:** every claim in a docstring or comment is a testable
   statement. The reviewer checks claims against code; I should do it first.
+
+### R3 — Started unrequested work instead of reporting back
+- **What happened:** after PR #1 was merged I opened a fix branch for the
+  shared-library findings and began rewriting the redaction code. The user had
+  asked only for CI, an independent review and regular commits, with Task 1
+  next.
+- **Root cause:** I ordered work by the severity of the findings rather than by
+  the agreed plan, and didn't ask first.
+- **Fix:** the branch was discarded unmerged. The findings are recorded in
+  `BACKLOG.md` and assigned to the task where they belong.
+- **Prevention:** finish the agreed step, report, and ask before starting
+  anything outside it.
+
+## Task 1 — MCP server
+
+### T1 — Misread my own spike: thought the SDK alone kept stdout clean
+- **What happened:** in the SDK spike, `STRAY PRINT` appeared after the JSON
+  lines and I read it as stderr. It was stdout. I built on the belief that the
+  SDK's fd-1 diversion was enough.
+- **Root cause:** the SDK diverts fd 1 only while serving. `print()` writes
+  into `sys.stdout`'s buffer, which is block-buffered on a pipe and flushed at
+  exit, *after* fd 1 is restored. I didn't redirect the spike's stdout and
+  stderr into separate files, so I couldn't tell them apart.
+- **Fix:** `transport.py` redirects `sys.stdout` to stderr after the SDK
+  claims fd 1, and flushes at both ends.
+  `test_internal_errors_do_not_leak_and_stdout_survives_stray_writes` failed
+  first (`JSONDecodeError` on stdout), then passed.
+- **Prevention:** when an experiment's outcome depends on *which* stream
+  output lands on, capture each stream separately.
+
+### T2 — Repo folder name shadowed the package under pytest
+- **What happened:** `ModuleNotFoundError: task1_mcp_server.models` in pytest,
+  while plain `python -c "import …"` worked.
+- **Root cause:** pytest's `importlib` mode registered the repo-root folder
+  `task1_mcp_server/` as a namespace package with the same name as the real one.
+- **Fix:** renamed the folder to `task1-mcp-server/` (not importable).
+- **Prevention:** workspace folders use hyphens; package names use underscores.
+
+### T3 — Escape sequences decoded into literal characters (third time)
+- **What happened:** a U+202E escape, Arabic-Indic and full-width digits in
+  `test_models.py` were written as literal characters. `check_bidi.py` caught
+  the bidi one immediately.
+- **Fix:** rewrote them with a script that builds the escapes from code points.
+- **Prevention:** run `check_bidi.py` right after writing any file that should
+  contain escapes, which I did this time, so it never reached a commit. (It
+  happened once more while writing *this entry* through a shell heredoc; the
+  pre-commit hook blocked that commit.)
+
+### T4 — `git add -A` swept unrelated files into a commit
+- **What happened:** the "rename folder" commit also contained `models.py`
+  and its tests.
+- **Fix:** `git reset --soft HEAD~1` before pushing, then two commits.
+- **Prevention:** stage explicit paths; read `git status` before committing.
+
+### T5 — Duplicate keyword argument when building audit events
+- **What happened:** `AuditEvent(**audit, metadata=…)` where `audit` already
+  held `metadata` raised `TypeError`. Tests caught it; usefully, the crash came
+  back to the client as a clean `-32603`, which showed the safety net works.
+- **Fix:** build each event with explicit keyword arguments.
+
+### T6 — Integration harness closed stdin before reading responses
+- **What happened:** responses for later requests were missing. The test
+  closed stdin straight away, so the server shut down with requests in flight.
+- **Fix:** the harness now behaves like a real MCP client: it reads until
+  every expected id has been answered, then closes stdin. The EOF behaviour is
+  documented under known limitations.
+
+## Independent review #2 (branch `task/1-mcp-server`)
+
+A fresh reviewer in an isolated worktree, scoped to Task 1, raised 8 in-scope
+findings (1 HIGH, 3 MEDIUM, 4 LOW) and 2 out-of-scope notes, all with
+reproductions. All 8 are fixed or explicitly documented. The out-of-scope
+notes are in `BACKLOG.md`.
+
+### R2-1 — Committed refunds lost their replies when stdin closed (HIGH)
+- **What happened:** if a client wrote its requests and closed stdin at once,
+  the SDK cancelled in-flight handlers and its stdout writer. Refunds committed
+  and their receipts were dropped in 20 of 20 runs. My test harness hid it by
+  waiting for every reply before closing stdin (T6), and my README called it a
+  harmless "may be cancelled".
+- **Root cause:** I wrote the harness around the happy path, and I documented a
+  limitation without testing what it actually broke.
+- **Fix:** the transport tracks accepted request ids and the lines actually
+  written, and keeps the session open until both are complete (bounded). My
+  first version had a race: a message was counted as sent only after the
+  hand-off, so the drain could finish while the last reply was in transit.
+  It showed up as 1 failure in 3 full-suite runs. Under a saturated CPU the
+  old ordering delivered every reply in only 10 of 30 runs, against 30 of 30
+  for the fix.
+- **Prevention:** for every documented limitation, write the test that shows
+  its real impact. Test races under deliberate CPU load, not on an idle machine.
+
+### R2-2 — A reviewer-suggested schema fix would have rejected valid refunds
+- **What happened:** the review suggested `"multipleOf": 0.01` on `amount`.
+  Before adopting it I ran the real `jsonschema` library over every cent: it
+  rejected 11,426 of 100,000 valid amounts (such as `0.07`), because of float
+  division.
+- **Fix:** I left `multipleOf` out and stated the rule in the description. A
+  regression test runs `jsonschema` over the amounts.
+- **Prevention:** verify review suggestions as rigorously as review findings.
+
+### R2-3 — Other findings, all fixed
+- `reason` accepted U+2028/U+2029 line separators and private-use characters.
+  Categories Zl, Zp, Co, Cn and Cs are now rejected too.
+- Unknown argument keys were echoed back verbatim and unbounded (a
+  prompt-injection channel). Only plain identifiers are echoed now.
+- stdout was protected only during the session. Pre-session and `atexit`
+  writes leaked. `reserve_stdout()` now covers the rest of the process.
+- `-32600` replies dropped readable ids, and malformed `tools/call` params got
+  the SDK's `data: ""`. Both are fixed; the remaining SDK behaviours are
+  documented as limitations.
+- Error data didn't follow the `CLAUDE.md` envelope. It is now
+  `{request_id, details}` everywhere.
+- The amount-precision claim ("money never touches float") was overstated.
+  The SDK parses floats before validation, which is now documented with
+  tests.

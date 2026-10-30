@@ -1,0 +1,23 @@
+[project]
+name = "task1-mcp-server"
+version = "0.1.0"
+description = "Task 1: MCP server (stdio) exposing customer tools with strict input validation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "quilr-common",
+    "mcp>=2.3,<3",
+    "pydantic>=2.14,<3",
+]
+
+[project.scripts]
+task1-mcp-server = "task1_mcp_server.__main__:main"
+
+[tool.uv.sources]
+quilr-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task1_mcp_server"]
