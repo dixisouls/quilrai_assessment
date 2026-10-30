@@ -103,25 +103,52 @@ fail closed, auditable, low latency, and honest about its limits.**
   string lengths. Unbounded input is a DoS.
 - Money is `Decimal`, never float arithmetic. Bound and quantize it.
 
-### Errors & information leakage
-- Clients receive a **standardized error payload** only: stable code, safe
-  message, and a request/correlation ID. Never stack traces, upstream bodies,
-  hostnames, file paths, SQL, library names, or provider API keys.
-- JSON-RPC errors use spec codes: `-32700` parse, `-32600` invalid request,
-  `-32601` method not found, `-32602` invalid params, `-32603` internal;
-  application codes in the `-32000..-32099` server range (e.g. `-32001`
-  Unauthorized Tool Call). Always echo the request `id` (or `null` if
-  unparseable).
+### Errors & information leakage — "tell the caller what *they* can fix"
+Clients **do** get useful errors. What they never get is *our internals*. The
+split follows who can act on the information:
 
-### Logging & audit
-- **stdout is sacred** for stdio MCP servers: JSON-RPC only. All logs → stderr.
-  No `print()` anywhere in library code (enforced by a lint rule and a test).
-- Structured JSON logs. Every security decision (allow/deny/redact/rate-limit/
-  failover) emits an audit event with: timestamp, request ID, principal/tenant,
-  action, decision, reason.
-- **Never log secrets or PII**: no tokens, API keys, raw prompts/completions,
-  or unredacted tool arguments. Log hashes/IDs/lengths instead. Log redaction
-  is applied as a logging filter, not left to each call site.
+| Situation | Client receives | Stays in logs only (by `request_id`) |
+|---|---|---|
+| Bad input (4xx) | Exactly what's wrong: field path, the violated rule, how to fix it | The rejected *value* (may be PII); we don't echo it back |
+| AuthN failure (401) | `invalid_token` plus a short reason (`expired`, `malformed`), per RFC 6750 | Which check failed in detail (signature, issuer, kid) |
+| AuthZ failure (403 / -32001) | Which tool or action was denied and the role required | Policy evaluation trace |
+| Rate limited (429) | Limit, remaining, `Retry-After`, `X-RateLimit-*` headers | Per-tenant counters |
+| Upstream/internal (5xx) | Generic message + stable code + `request_id` | Stack trace, provider error body, hostnames, SQL, timings |
+
+- Every response carries `X-Request-ID`, and every error body carries
+  `request_id`. Support pastes that ID to find the full detail in the logs.
+  That is the industry pattern (Stripe, OpenAI, Google AIP-193).
+- **Envelope per protocol** (defined once, in `common/`):
+  - LLM gateway (OpenAI-compatible): the OpenAI error shape
+    `{"error": {"message", "type", "code", "param", "request_id"}}`, so
+    existing OpenAI/Anthropic-style SDKs parse it unchanged.
+  - MCP gateway / server: the JSON-RPC 2.0 error object
+    `{"code", "message", "data": {"request_id", "details"?}}`.
+    Spec codes: `-32700` parse, `-32600` invalid request, `-32601` method not
+    found, `-32602` invalid params, `-32603` internal. Application codes use
+    the `-32000..-32099` range (e.g. `-32001` Unauthorized Tool Call). Always
+    echo the request `id` (`null` if unparseable).
+  - Other HTTP endpoints: RFC 9457 Problem Details (`application/problem+json`).
+- Never in a response: stack traces, upstream bodies, hostnames, file paths,
+  SQL, library names, provider names/keys (unless intentionally exposed).
+
+### Logging & audit (implemented in `common/src/quilr_common/log/`)
+- **stdout is sacred** for stdio MCP servers: JSON-RPC only. Use
+  `configure_logging(..., stdout_reserved=True)`; it refuses stdout sinks.
+  `print()` is banned by ruff `T20`.
+- One JSON object per line: `ts`, `level`, `logger`, `msg`, `service`,
+  `request_id`/`tenant_id`/`principal` (from `bind_context`), extras, `exc`.
+- Every security decision calls `emit_audit(AuditEvent(...))`. Audit events
+  bypass `LOG_LEVEL` and are optionally written to an HMAC-keyed, hash-chained
+  file (`LOG_AUDIT_PATH`, `LOG_AUDIT_HMAC_KEY`), checked with `verify_chain`.
+- **Never log secrets or PII.** Redaction runs centrally in the formatter and
+  covers messages, extras, context, stack traces and fallback paths. Call
+  sites still log IDs, lengths and hashes rather than raw prompts or tool
+  arguments.
+- **Where logs go (12-factor):** services write the event stream to
+  stdout/stderr and never manage log files. In Docker, a log shipper collects
+  container output and routes it to storage and search. The audit chain file
+  lives on its own volume.
 
 ### Secrets & config
 - Secrets only via environment variables / `.env` (git-ignored). A committed
