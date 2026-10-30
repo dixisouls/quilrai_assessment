@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import sys
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
@@ -171,3 +172,31 @@ def test_console_formatter_is_human_readable_and_redacted() -> None:
     assert f"user {REDACTED}" in out
     assert "tenant_id=acme" in out
     assert "\n" not in out
+
+
+def test_nested_lists_are_truncated(capture: Any) -> None:
+    logger, buf = capture
+    logger.info("x", extra={"items": ["z" * 1000]})
+    [rec] = _lines(buf)
+    assert rec["items"][0].endswith("…[TRUNCATED:700]")
+
+
+def test_console_formatter_renders_non_strings_and_quoted_strings() -> None:
+    record = logging.makeLogRecord(
+        {"name": "svc", "msg": "m", "latency_ms": 12, "note": "two words", "tags": ["a"]}
+    )
+    out = ConsoleFormatter(SERVICE).format(record)
+    assert "latency_ms=12" in out
+    assert "note='two words'" in out
+    assert 'tags=["a"]' in out
+
+
+def test_console_formatter_appends_redacted_stack() -> None:
+    try:
+        raise ValueError("leak jane@example.com")
+    except ValueError:
+        record = logging.makeLogRecord({"name": "svc", "msg": "m", "exc_info": sys.exc_info()})
+    out = ConsoleFormatter(SERVICE).format(record)
+    _, _, stack = out.partition("\n")
+    assert "Traceback" in stack
+    assert "jane@example.com" not in out
