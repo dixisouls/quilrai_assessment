@@ -108,3 +108,57 @@ are fixed on `fix/common-review-findings` (entries below).
   with tests asserting the titles pass the policy.
 - **Prevention:** every claim in a docstring or comment is a testable
   statement. The reviewer checks claims against code; I should do it first.
+
+## Task 1 — MCP server
+
+### T1 — Misread my own spike: thought the SDK alone kept stdout clean
+- **What happened:** in the SDK spike, `STRAY PRINT` appeared after the JSON
+  lines and I read it as stderr. It was stdout. I built on the belief that the
+  SDK's fd-1 diversion was enough.
+- **Root cause:** the SDK diverts fd 1 only while serving. `print()` writes
+  into `sys.stdout`'s buffer, which is block-buffered on a pipe and flushed at
+  exit, *after* fd 1 is restored. I didn't redirect the spike's stdout and
+  stderr into separate files, so I couldn't tell them apart.
+- **Fix:** `transport.py` redirects `sys.stdout` to stderr after the SDK
+  claims fd 1, and flushes at both ends.
+  `test_internal_errors_do_not_leak_and_stdout_survives_stray_writes` failed
+  first (`JSONDecodeError` on stdout), then passed.
+- **Prevention:** when an experiment's outcome depends on *which* stream
+  output lands on, capture each stream separately.
+
+### T2 — Repo folder name shadowed the package under pytest
+- **What happened:** `ModuleNotFoundError: task1_mcp_server.models` in pytest,
+  while plain `python -c "import …"` worked.
+- **Root cause:** pytest's `importlib` mode registered the repo-root folder
+  `task1_mcp_server/` as a namespace package with the same name as the real one.
+- **Fix:** renamed the folder to `task1-mcp-server/` (not importable).
+- **Prevention:** workspace folders use hyphens; package names use underscores.
+
+### T3 — Escape sequences decoded into literal characters (third time)
+- **What happened:** a U+202E escape, Arabic-Indic and full-width digits in
+  `test_models.py` were written as literal characters. `check_bidi.py` caught
+  the bidi one immediately.
+- **Fix:** rewrote them with a script that builds the escapes from code points.
+- **Prevention:** run `check_bidi.py` right after writing any file that should
+  contain escapes, which I did this time, so it never reached a commit. (It
+  happened once more while writing *this entry* through a shell heredoc; the
+  pre-commit hook blocked that commit.)
+
+### T4 — `git add -A` swept unrelated files into a commit
+- **What happened:** the "rename folder" commit also contained `models.py`
+  and its tests.
+- **Fix:** `git reset --soft HEAD~1` before pushing, then two commits.
+- **Prevention:** stage explicit paths; read `git status` before committing.
+
+### T5 — Duplicate keyword argument when building audit events
+- **What happened:** `AuditEvent(**audit, metadata=…)` where `audit` already
+  held `metadata` raised `TypeError`. Tests caught it; usefully, the crash came
+  back to the client as a clean `-32603`, which showed the safety net works.
+- **Fix:** build each event with explicit keyword arguments.
+
+### T6 — Integration harness closed stdin before reading responses
+- **What happened:** responses for later requests were missing. The test
+  closed stdin straight away, so the server shut down with requests in flight.
+- **Fix:** the harness now behaves like a real MCP client: it reads until
+  every expected id has been answered, then closes stdin. The EOF behaviour is
+  documented under known limitations.
