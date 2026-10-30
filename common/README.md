@@ -9,19 +9,33 @@ added here as the tasks need them.
 
 ```python
 from quilr_common.log import (
-    AuditEvent, Decision, ServiceInfo, bind_context, configure_logging,
-    emit_audit, get_logger, sanitize_request_id,
+    AuditEvent,
+    Decision,
+    ServiceInfo,
+    bind_context,
+    configure_logging,
+    emit_audit,
+    get_logger,
+    sanitize_request_id,
 )
 
 configure_logging(ServiceInfo(name="mcp-gateway", version="1.0.0", env="prod"))
 log = get_logger(__name__)
 
-with bind_context(request_id=sanitize_request_id(headers.get("x-request-id")),
-                  tenant_id="acme", principal="user-42"):
+with bind_context(
+    request_id=sanitize_request_id(headers.get("x-request-id")),
+    tenant_id="acme",
+    principal="user-42",
+):
     log.info("tool call received", extra={"tool": "admin_reset_key"})
-    emit_audit(AuditEvent(action="tools.call", decision=Decision.DENY,
-                          reason="role 'viewer' may not call admin_* tools",
-                          resource="admin_reset_key"))
+    emit_audit(
+        AuditEvent(
+            action="tools.call",
+            decision=Decision.DENY,
+            reason="role 'viewer' may not call admin_* tools",
+            resource="admin_reset_key",
+        )
+    )
 ```
 
 Sample output (one line each, shown pretty-printed here):
