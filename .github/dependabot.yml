@@ -1,0 +1,26 @@
+# Keeps pinned action SHAs and locked Python deps current. PRs go through the
+# same CI gates as any other change. Group names stay short so grouped PR
+# titles fit the 72-char commit header limit (scripts/check_commits.py).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      py:
+        update-types: [minor, patch]

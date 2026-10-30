@@ -1,0 +1,62 @@
+# Local gates: the same tools and versions as CI (they run from uv.lock), so a
+# problem is caught before it is pushed. Install with `make install`.
+#
+# Stages:
+#   pre-commit  fast checks on staged files
+#   commit-msg  commit policy (conventional commits, no AI attribution)
+#   pre-push    full mypy + test suite
+#
+# Gitleaks and actionlint run in CI only. To run them locally, install them
+# (`brew install gitleaks actionlint`) and use `make security`.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
+    hooks:
+      - id: no-commit-to-branch # work happens on branches; main changes only via PR
+        args: [--branch, main]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types_or: [python, pyi, markdown]
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
+      - id: bidi
+        name: trojan-source check
+        entry: uv run --frozen python scripts/check_bidi.py
+        language: system
+        types: [text]
+      - id: commit-policy
+        name: commit message policy
+        entry: uv run --frozen python scripts/check_commits.py --file
+        language: system
+        stages: [commit-msg]
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run --frozen mypy
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest
+        name: pytest
+        entry: uv run --frozen pytest -q --cov
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
