@@ -18,7 +18,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded branch runs are cancelled; every main commit gets a full run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   UV_LOCKED: "1" # fail if uv.lock is out of date with pyproject.toml

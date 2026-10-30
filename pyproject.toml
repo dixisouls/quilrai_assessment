@@ -19,6 +19,8 @@ dev = [
 
 [tool.uv]
 package = false
+# One toolchain everywhere: setup-uv in CI reads this, local runs enforce it.
+required-version = "==0.13.6"
 
 [tool.uv.workspace]
 members = ["common"]

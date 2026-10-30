@@ -79,3 +79,32 @@ Format: **what happened → root cause → fix → prevention.**
   truncation is documented as needing an external head-hash anchor.
 - **Prevention:** for every integrity control, write at least one test from the
   viewpoint of an attacker who has read the source code.
+
+## Independent review #1 (branch `chore/ci-setup`)
+
+A fresh reviewer agent with no shared context reviewed the foundations and CI.
+It raised 18 findings (3 HIGH, 7 MEDIUM, 8 LOW), each with a reproduction. The
+tooling findings are fixed on `chore/ci-setup`. The shared-library findings
+are fixed on `fix/common-review-findings` (entries below).
+
+### R1 — Commit checker treated history `#` lines as comments and ignored `git commit -v`
+- **What happened:** in `--range` mode, a header such as `#42 fix …` was
+  stripped as a comment and reported as an empty message. In hook mode, the
+  diff below the scissors line counted as body text.
+- **Root cause:** editor-cleanup rules were applied to messages that had
+  already been cleaned (history), and git's scissors convention was missed.
+- **Fix:** `strip_comments` applies only in `--file` mode and stops at the
+  scissors line. Regression tests added for both.
+
+### R2 — Tooling claims that weren't true
+- **What happened:** CI cancelled in-progress runs on `main`, so a merge could
+  end up without a completed run. The uv version wasn't pinned, although the
+  pre-commit header promised "the same versions as CI". `check_bidi` claimed
+  "zero-width" coverage but missed ZWNJ/ZWJ, soft hyphen and invisible math
+  operators. Grouped Dependabot PR titles would exceed the 72-char header limit.
+- **Fix:** `cancel-in-progress` is off for `main`. `required-version =
+  "==0.13.6"` in `pyproject.toml` is read by setup-uv in CI. The character set
+  is extended and its scope documented. Dependabot group names are shortened,
+  with tests asserting the titles pass the policy.
+- **Prevention:** every claim in a docstring or comment is a testable
+  statement. The reviewer checks claims against code; I should do it first.
