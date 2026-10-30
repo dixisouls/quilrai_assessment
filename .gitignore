@@ -30,3 +30,4 @@ logs/
 .claude/settings.local.json
 .req-audit.txt
 reports/
+.coverage.*

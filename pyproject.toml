@@ -43,6 +43,9 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
+# Integration tests spawn real server processes; measure those too.
+patch = ["subprocess"]
+parallel = true
 source = ["quilr_common", "scripts", "task1_mcp_server"]
 omit = ["*/tests/*"]
 
