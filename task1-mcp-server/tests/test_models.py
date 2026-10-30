@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -212,3 +213,84 @@ def test_published_schema_carries_the_constraints() -> None:
     assert props["amount"]["exclusiveMinimum"] == 0
     assert props["amount"]["maximum"] == MAX_REFUND_AMOUNT
     assert props["reason"]["minLength"] == 10
+
+
+# --- Review #2 regressions ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "codepoint",
+    [
+        0x2028,  # LINE SEPARATOR (category Zl)
+        0x2029,  # PARAGRAPH SEPARATOR (Zp)
+        0xE000,  # private use (Co)
+        0x0378,  # unassigned (Cn)
+        0x0085,  # NEXT LINE (Cc)
+    ],
+)
+def test_reason_rejects_line_breaking_and_invisible_categories(codepoint: int) -> None:
+    with pytest.raises(ValidationError):
+        TriggerRefundInput.model_validate(_refund(reason=f"Line one{chr(codepoint)}line two"))
+
+
+def test_reason_rejects_lone_surrogates() -> None:
+    with pytest.raises(ValidationError):
+        TriggerRefundInput.model_validate(_refund(reason="valid reason " + chr(0xD800)))
+
+
+@pytest.mark.parametrize(
+    ("raw_amount", "accepted"),
+    [
+        ("10.001", False),
+        ("0.001", False),
+        ("1e-3", False),
+        ("19.99", True),
+        ("1e2", True),
+        ("1E-2", True),
+        ("-0", False),
+        ("10000.00", True),
+        ("10000.01", False),
+    ],
+)
+def test_amount_rules_hold_for_raw_json_text(raw_amount: str, *, accepted: bool) -> None:
+    # The SDK hands us JSON already parsed to Python numbers; exercise that path too.
+    raw = f'{{"customer_id":"CUST-00042","amount":{raw_amount},"reason":"Duplicate charge"}}'
+    if accepted:
+        assert TriggerRefundInput.model_validate_json(raw).amount > 0
+    else:
+        with pytest.raises(ValidationError):
+            TriggerRefundInput.model_validate_json(raw)
+
+
+def test_published_amount_schema_never_rejects_a_valid_amount() -> None:
+    # "multipleOf": 0.01 looks right but float-dividing validators reject e.g. 0.07.
+    # The schema may be looser than the server on precision, never stricter.
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = TriggerRefundInput.model_json_schema()
+    assert "multipleOf" not in schema["properties"]["amount"]
+    assert "2 decimal places" in schema["properties"]["amount"]["description"]
+    validator = jsonschema.Draft202012Validator(schema)
+    # Every cent up to 100.00 (where float artefacts are densest), then a sweep to the cap.
+    for cents in [*range(1, 10_001), *range(10_001, MAX_REFUND_AMOUNT * 100 + 1, 997)]:
+        amount = cents / 100
+        assert validator.is_valid(_refund(amount=amount)), amount
+        TriggerRefundInput.model_validate(_refund(amount=amount))
+
+
+def test_published_reason_pattern_agrees_with_the_validator() -> None:
+    pattern = re.compile(TriggerRefundInput.model_json_schema()["properties"]["reason"]["pattern"])
+    samples = [
+        "Duplicate charge on invoice",
+        "Line one" + chr(0x2028) + "line two",
+        "tab" + chr(9) + "separated reason",
+        "bidi" + chr(0x202E) + " reason text",
+        "zero" + chr(0x200B) + "width reason",
+        "Ünïcödé reason ok",
+    ]
+    for text in samples:
+        try:
+            TriggerRefundInput.model_validate(_refund(reason=text))
+            enforced = True
+        except ValidationError:
+            enforced = False
+        assert bool(pattern.fullmatch(text)) == enforced, repr(text)
