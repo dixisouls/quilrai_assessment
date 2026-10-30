@@ -1,0 +1,58 @@
+[project]
+name = "quilr-assessment"
+version = "0.1.0"
+description = "QuilrAI assessment: MCP server, MCP security gateway, LLM gateway guardrails and routing"
+requires-python = ">=3.12,<3.13"
+dependencies = ["quilr-common"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2,<10",
+    "pytest-asyncio>=1.4,<2",
+    "pytest-cov>=7.1,<8",
+    "hypothesis>=6.170,<7",
+    "ruff>=0.17,<0.18",
+    "mypy>=2.4,<3",
+    "pip-audit>=2.10,<3",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["common"]
+
+[tool.uv.sources]
+quilr-common = { workspace = true }
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["common/tests"]
+markers = [
+    "live: hits real external providers; skipped unless the relevant API key is set",
+    "integration: spawns real processes / sockets",
+]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "SIM", "RET", "PTH", "T20", "ASYNC", "RUF", "BLE", "TRY", "PL"]
+ignore = ["TRY003", "PLR0913"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quilr_common"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the pytest idiom; magic values are fine in test expectations.
+# TRY301: tests raise inside try on purpose to exercise exception logging.
+"**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+plugins = ["pydantic.mypy"]

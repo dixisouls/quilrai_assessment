@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets & local state — never commit
+.env
+*.env.local
+*.sqlite3
+*.db
+var/
+logs/
+*.log
+*.jsonl
+
+# Tooling
+.code-review-graph/
+.DS_Store
+
+# Local tool settings
+.claude/settings.local.json
