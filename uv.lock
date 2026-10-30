@@ -1008,7 +1008,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "quilr-common", editable = "common" },
-    { name = "task1-mcp-server", editable = "task1_mcp_server" },
+    { name = "task1-mcp-server", editable = "task1-mcp-server" },
 ]
 
 [package.metadata.requires-dev]
@@ -1178,7 +1178,7 @@ wheels = [
 [[package]]
 name = "task1-mcp-server"
 version = "0.1.0"
-source = { editable = "task1_mcp_server" }
+source = { editable = "task1-mcp-server" }
 dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
