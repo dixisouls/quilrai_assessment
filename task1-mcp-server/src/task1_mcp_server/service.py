@@ -6,7 +6,7 @@ Three failure classes, each with a deliberate wire representation:
 Failure                            Response
 =================================  ==========================================
 Arguments fail the input schema    JSON-RPC error ``-32602 Invalid params``,
-(or the tool name is unknown)      ``data.errors`` = field, message, type.
+(or the tool name is unknown)      ``data.details`` = field, message, type.
                                    Input *values* are never echoed (they may
                                    be PII or an injection payload).
 Valid input, business rule says    ``CallToolResult(is_error=True)`` with a
@@ -15,10 +15,12 @@ balance exceeded)                  This is a successful *call* whose outcome is
                                    a refusal, which is MCP's "tool execution
                                    error".
 Anything unexpected                JSON-RPC error ``-32603 Internal error``
-                                   with only a ``correlation_id``. The
-                                   traceback goes to the server log (stderr)
-                                   under the same id.
+                                   with only a ``request_id``. The traceback
+                                   goes to the server log (stderr) under the
+                                   same id.
 =================================  ==========================================
+
+Every error uses the envelope in :mod:`task1_mcp_server.errors`.
 
 Why ``-32602`` for bad arguments instead of the SDK's default ``is_error``
 result: the assessment requires standard JSON-RPC error codes for invalid
@@ -29,7 +31,6 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -40,6 +41,13 @@ from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, ValidationError
 
 from quilr_common.log import AuditEvent, Decision, emit_audit, get_logger
+from task1_mcp_server.errors import (
+    ErrorDetail,
+    details_from,
+    internal_error,
+    invalid_params,
+    new_request_id,
+)
 from task1_mcp_server.models import (
     CustomerRecord,
     GetCustomerRecordInput,
@@ -61,18 +69,6 @@ class ToolExecutionError(Exception):
 
 def _money(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.01'))}"
-
-
-def _invalid_params(exc: ValidationError) -> MCPError:
-    errors = [
-        {
-            "field": ".".join(str(part) for part in err["loc"]) or "(arguments)",
-            "message": err["msg"],
-            "type": err["type"],
-        }
-        for err in exc.errors(include_url=False, include_input=False, include_context=False)
-    ]
-    return MCPError(types.INVALID_PARAMS, "Invalid params", {"errors": errors})
 
 
 type Handler = Callable[[Any], Awaitable[BaseModel]]
@@ -141,14 +137,28 @@ class CustomerToolService:
         spec = self._tools.get(name)
         if spec is None:
             # The requested name is attacker-controlled; don't reflect it back.
-            raise MCPError(
-                types.INVALID_PARAMS, "Unknown tool", {"available_tools": sorted(self._tools)}
+            request_id = new_request_id()
+            log.info("unknown tool requested", extra={"request_id": request_id})
+            available = ", ".join(sorted(self._tools))
+            raise invalid_params(
+                request_id,
+                [
+                    ErrorDetail(
+                        field="name",
+                        message=f"Unknown tool. Available: {available}",
+                        type="unknown_tool",
+                    )
+                ],
             )
         try:
             params = spec.input_model.model_validate(dict(arguments or {}))
         except ValidationError as exc:
-            log.info("tool arguments rejected", extra={"tool": name, "errors": exc.error_count()})
-            raise _invalid_params(exc) from None
+            request_id = new_request_id()
+            log.info(
+                "tool arguments rejected",
+                extra={"tool": name, "errors": exc.error_count(), "request_id": request_id},
+            )
+            raise invalid_params(request_id, details_from(exc)) from None
 
         started = time.perf_counter()
         try:
@@ -161,11 +171,9 @@ class CustomerToolService:
         except MCPError:
             raise
         except Exception:
-            correlation_id = uuid.uuid4().hex
-            log.exception("tool crashed", extra={"tool": name, "correlation_id": correlation_id})
-            raise MCPError(
-                types.INTERNAL_ERROR, "Internal error", {"correlation_id": correlation_id}
-            ) from None
+            request_id = new_request_id()
+            log.exception("tool crashed", extra={"tool": name, "request_id": request_id})
+            raise internal_error(request_id) from None
 
         structured = output.model_dump(mode="json")
         log.info(

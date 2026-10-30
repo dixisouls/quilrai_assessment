@@ -133,17 +133,14 @@ def test_full_session_over_raw_stdio() -> None:
     assert (receipt["amount"], receipt["remaining_refundable_balance"]) == ("10.50", "239.50")
 
     assert res[4]["error"]["code"] == -32602
-    assert res[4]["error"]["data"]["errors"][0]["field"] == "customer_id"
+    assert res[4]["error"]["data"]["details"][0]["field"] == "customer_id"
 
     assert res[5]["error"]["code"] == -32602
-    assert {e["field"] for e in res[5]["error"]["data"]["errors"]} == {"amount", "reason"}
+    assert {e["field"] for e in res[5]["error"]["data"]["details"]} == {"amount", "reason"}
 
     assert res[6]["result"]["isError"] is True  # business outcome, not protocol error
-    assert res[7]["error"] == {
-        "code": -32602,
-        "message": "Unknown tool",
-        "data": {"available_tools": ["get_customer_record", "trigger_refund"]},
-    }
+    assert res[7]["error"]["code"] == -32602
+    assert res[7]["error"]["data"]["details"][0]["type"] == "unknown_tool"
     assert res[8]["error"]["code"] == -32601
     assert res["str-id"]["result"] == {}
 
@@ -154,23 +151,53 @@ def test_full_session_over_raw_stdio() -> None:
 
 
 @pytest.mark.parametrize(
-    ("line", "code"),
+    ("line", "code", "echo_id"),
     [
-        ("{not json", -32700),
-        ('{"jsonrpc": "2.0", "id": 9, "method": "tools/list"', -32700),  # truncated
-        ('{"foo": 1}', -32600),
-        ("[]", -32600),  # batches are not part of MCP
-        ('[{"jsonrpc": "2.0", "id": 1, "method": "ping"}]', -32600),
-        ('{"jsonrpc": "1.0", "id": 1, "method": "ping"}', -32600),
-        ('"just a string"', -32600),
+        ("{not json", -32700, None),
+        ('{"jsonrpc": "2.0", "id": 9, "method": "tools/list"', -32700, None),  # truncated
+        ('{"foo": 1}', -32600, None),
+        ("[]", -32600, None),  # batches are not part of MCP
+        ('[{"jsonrpc": "2.0", "id": 1, "method": "ping"}]', -32600, None),
+        ('"just a string"', -32600, None),
+        # The id is readable, so JSON-RPC 2.0 requires echoing it rather than null.
+        ('{"jsonrpc": "1.0", "id": 1, "method": "ping"}', -32600, 1),
+        ('{"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": []}', -32600, 4),
+        ('{"jsonrpc": "2.0", "id": "abc", "method": 7}', -32600, "abc"),
+        # tools/call with params the SDK would answer with data: "".
+        ('{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {}}', -32602, 5),
+        (
+            '{"jsonrpc": "2.0", "id": 6, "method": "tools/call", '
+            '"params": {"name": 7, "arguments": {}}}',
+            -32602,
+            6,
+        ),
+        (
+            '{"jsonrpc": "2.0", "id": 7, "method": "tools/call", '
+            '"params": {"name": "get_customer_record", "arguments": "CUST-00042"}}',
+            -32602,
+            7,
+        ),
+        (
+            '{"jsonrpc": "2.0", "id": 8, "method": "tools/call", '
+            '"params": {"name": "get_customer_record", "arguments": ["CUST-00042"]}}',
+            -32602,
+            8,
+        ),
     ],
 )
-def test_malformed_messages_get_spec_errors_and_server_survives(line: str, code: int) -> None:
+def test_malformed_messages_get_spec_errors_and_server_survives(
+    line: str, code: int, echo_id: Any
+) -> None:
     stdout, _ = _run(
-        [line, json.dumps({"jsonrpc": "2.0", "id": 99, "method": "ping"})], expect={None, 99}
+        [line, json.dumps({"jsonrpc": "2.0", "id": 99, "method": "ping"})], expect={echo_id, 99}
     )
     res = _responses(stdout)
-    assert res[None]["error"]["code"] == code
+    error = res[echo_id]["error"]
+    assert error["code"] == code
+    assert set(error["data"]) <= {"request_id", "details"}
+    assert len(error["data"]["request_id"]) == 32
+    if code == -32602:
+        assert error["data"]["details"]  # same envelope as tool-level validation errors
     assert res[99]["result"] == {}  # still serving after the bad line
 
 
@@ -203,7 +230,7 @@ def test_internal_errors_do_not_leak_and_stdout_survives_stray_writes() -> None:
     assert error["message"] == "Internal error"
     assert "hunter2" not in json.dumps(error)
     assert "STRAY" in stderr  # diverted, not dropped
-    assert error["data"]["correlation_id"] in stderr  # operator can find the traceback
+    assert error["data"]["request_id"] in stderr  # operator can find the traceback
 
 
 def test_official_sdk_client_interoperates() -> None:
@@ -235,3 +262,72 @@ def test_official_sdk_client_interoperates() -> None:
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "['get_customer_record', 'trigger_refund'] Alan Turing -32602" in proc.stderr
+
+
+# --- Review #2 regressions ----------------------------------------------------
+
+
+def test_no_response_is_lost_when_stdin_closes_immediately() -> None:
+    # A client that writes everything and closes stdin at once (e.g. `cat reqs | server`).
+    # Refunds are not idempotent: if one commits, its receipt must be delivered.
+    refunds = [
+        json.dumps(
+            _call(
+                i,
+                "trigger_refund",
+                {"customer_id": "CUST-00101", "amount": 1, "reason": "Goodwill credit"},
+            )
+        )
+        for i in range(1, 6)
+    ]
+    pings = [json.dumps({"jsonrpc": "2.0", "id": 100 + i, "method": "ping"}) for i in range(3)]
+    payload = "".join(
+        line + "\n" for line in [json.dumps(INIT), json.dumps(INITIALIZED), *refunds, *pings]
+    )
+    for _ in range(3):  # the race lost replies on every run before the fix
+        proc = subprocess.run(
+            [sys.executable, "-m", "task1_mcp_server"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        res = _responses(proc.stdout.splitlines())
+        assert set(res) == {0, 1, 2, 3, 4, 5, 100, 101, 102}, proc.stderr[-1500:]
+        audits = [line for line in proc.stderr.splitlines() if '"decision": "allow"' in line]
+        assert len(audits) == 5  # every committed refund has a delivered receipt
+
+
+def test_stdout_stays_clean_outside_the_session_window() -> None:
+    harness = textwrap.dedent(
+        """
+        import atexit
+        import task1_mcp_server.__main__ as entry
+
+        real_build = entry.build_server
+
+        def noisy_build(service):
+            print("PRE-CLAIM STRAY")  # after run() starts, before the SDK claims fd 1
+            return real_build(service)
+
+        entry.build_server = noisy_build
+        atexit.register(lambda: print("ATEXIT STRAY"))
+        entry.run()
+        """
+    )
+    for unbuffered in ("0", "1"):
+        env = {**os.environ, "PYTHONUNBUFFERED": unbuffered}
+        payload = json.dumps(INIT) + "\n" + json.dumps(INITIALIZED) + "\n"
+        proc = subprocess.run(  # noqa: S603 - fixed argv
+            [sys.executable, "-c", harness],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env=env,
+        )
+        _responses(proc.stdout.splitlines())  # every stdout line must be JSON-RPC
+        assert "PRE-CLAIM STRAY" in proc.stderr
+        assert "ATEXIT STRAY" in proc.stderr

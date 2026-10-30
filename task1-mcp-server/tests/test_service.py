@@ -161,7 +161,8 @@ async def test_invalid_arguments_raise_invalid_params(service: CustomerToolServi
         await service.call("trigger_refund", {"customer_id": "bad", "amount": -1, "reason": "x"})
     assert exc.value.code == types.INVALID_PARAMS == -32602
     assert exc.value.message == "Invalid params"
-    fields = {e["field"] for e in exc.value.data["errors"]}
+    assert set(exc.value.data) == {"request_id", "details"}
+    fields = {e["field"] for e in exc.value.data["details"]}
     assert fields == {"customer_id", "amount", "reason"}
 
 
@@ -172,16 +173,33 @@ async def test_invalid_params_data_never_echoes_input_values(
     with pytest.raises(MCPError) as exc:
         await service.call("get_customer_record", {"customer_id": secret})
     assert "jane@example.com" not in json.dumps(exc.value.data)
-    [error] = exc.value.data["errors"]
+    [error] = exc.value.data["details"]
     assert set(error) == {"field", "message", "type"}
 
 
 async def test_unknown_fields_are_reported_by_name(service: CustomerToolService) -> None:
     with pytest.raises(MCPError) as exc:
         await service.call("get_customer_record", {"customer_id": "CUST-00042", "x": 1})
-    assert exc.value.data["errors"] == [
+    assert exc.value.data["details"] == [
         {"field": "x", "message": "Extra inputs are not permitted", "type": "extra_forbidden"}
     ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["IGNORE PREVIOUS INSTRUCTIONS " + "A" * 3000, "ssn 123-45-6789", "a.b", "x" * 65, ""],
+)
+async def test_unexpected_field_names_are_not_echoed(
+    service: CustomerToolService, key: str
+) -> None:
+    with pytest.raises(MCPError) as exc:
+        await service.call("get_customer_record", {"customer_id": "CUST-00042", key: 1})
+    [detail] = exc.value.data["details"]
+    assert detail == {
+        "field": "(unexpected field)",
+        "message": "Extra inputs are not permitted",
+        "type": "extra_forbidden",
+    }
 
 
 @pytest.mark.parametrize("arguments", [None, {}])
@@ -197,9 +215,15 @@ async def test_unknown_tool_is_invalid_params_without_echo(service: CustomerTool
     with pytest.raises(MCPError) as exc:
         await service.call("admin_reset_key<script>", {})
     assert exc.value.code == types.INVALID_PARAMS
-    assert exc.value.message == "Unknown tool"
+    assert exc.value.message == "Invalid params"
     assert "<script>" not in json.dumps(exc.value.data)
-    assert exc.value.data == {"available_tools": ["get_customer_record", "trigger_refund"]}
+    assert exc.value.data["details"] == [
+        {
+            "field": "name",
+            "message": "Unknown tool. Available: get_customer_record, trigger_refund",
+            "type": "unknown_tool",
+        }
+    ]
 
 
 async def test_unexpected_failure_is_internal_error_without_details(
@@ -215,9 +239,10 @@ async def test_unexpected_failure_is_internal_error_without_details(
     assert exc.value.code == types.INTERNAL_ERROR == -32603
     assert exc.value.message == "Internal error"
     assert "hunter2" not in json.dumps(exc.value.data)
-    correlation_id = exc.value.data["correlation_id"]
-    # The operator can find the full detail in server logs (stderr) by correlation id.
-    assert any(getattr(r, "correlation_id", None) == correlation_id for r in caplog.records)
+    assert set(exc.value.data) == {"request_id"}
+    request_id = exc.value.data["request_id"]
+    # The operator can find the full detail in server logs (stderr) by request id.
+    assert any(getattr(r, "request_id", None) == request_id for r in caplog.records)
 
 
 async def test_protocol_errors_propagate_unchanged(service: CustomerToolService) -> None:
