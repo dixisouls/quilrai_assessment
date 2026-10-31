@@ -1,0 +1,26 @@
+[project]
+name = "task3-pii-guardrail"
+version = "0.1.0"
+description = "Task 3: LLM gateway that streams provider output through a PII-redaction guardrail"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "quilr-common",
+    "anthropic>=2.3,<3",        # official SDK for the provider call
+    "starlette>=1.10,<2",
+    "uvicorn>=0.54,<1",
+    "pydantic>=2.14,<3",
+    "pydantic-settings>=2.16,<3",
+]
+
+[project.scripts]
+task3-pii-guardrail = "task3_pii_guardrail.__main__:main"
+
+[tool.uv.sources]
+quilr-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task3_pii_guardrail"]
