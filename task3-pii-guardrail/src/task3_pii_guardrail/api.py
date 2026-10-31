@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
@@ -42,7 +43,7 @@ from quilr_common.log import (
 )
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
-from task3_pii_guardrail.providers import Finish, Provider, ProviderError, ProviderEvent
+from task3_pii_guardrail.providers import BlockEnd, Finish, Provider, ProviderError, ProviderEvent
 from task3_pii_guardrail.redactor import StreamRedactor, redact_counted
 
 log = get_logger(__name__)
@@ -59,6 +60,25 @@ _PROVIDER_MESSAGE: Final = {
     "timeout": "The model provider timed out.",
     "bad_request": "The model provider rejected the request.",
 }
+
+
+def _error_body(
+    message: str, kind: str, request_id: str, param: str | None = None
+) -> dict[str, Any]:
+    return {
+        "message": message,
+        "type": kind,
+        "code": None,
+        "param": param,
+        "request_id": request_id,
+    }
+
+
+def _retry_after_header(value: float | None) -> dict[str, str] | None:
+    # Defence in depth: providers already sanitise, but never let a bad value 500.
+    if value is None or not math.isfinite(value) or not 0 <= value <= 3600:  # noqa: PLR2004
+        return None
+    return {"retry-after": str(int(value))}
 
 
 def _error(
@@ -86,7 +106,7 @@ def _error(
 
 def _provider_error(exc: ProviderError, request_id: str) -> JSONResponse:
     log.warning("provider error", extra={"kind": exc.kind, "detail": exc.detail})
-    headers = {"retry-after": str(int(exc.retry_after))} if exc.retry_after is not None else None
+    headers = _retry_after_header(exc.retry_after)
     kind = "rate_limit_error" if exc.kind == "rate_limited" else "provider_error"
     return _error(
         _PROVIDER_STATUS[exc.kind], _PROVIDER_MESSAGE[exc.kind], kind, request_id, headers=headers
@@ -109,7 +129,7 @@ class _Gateway:
         """Return a non-reversible principal id for a valid key, else None."""
         if not header or not header.lower().startswith("bearer "):
             return None
-        presented = header[7:].strip().encode()
+        presented = header[7:].encode()  # exact bytes: no stripping, so blank tokens can't match
         valid = False
         for key in self._keys:  # check every key: timing doesn't reveal which matched
             valid |= hmac.compare_digest(presented, key)
@@ -124,9 +144,9 @@ class _Gateway:
                     401, "Invalid or missing API key.", "authentication_error", request_id
                 )
             with bind_context(principal=principal):
-                return await self._handle(request, request_id)
+                return await self._handle(request, request_id, principal)
 
-    async def _handle(self, request: Request, request_id: str) -> Response:
+    async def _handle(self, request: Request, request_id: str, principal: str) -> Response:
         chat = await self._parse(request, request_id)
         if isinstance(chat, Response):
             return chat
@@ -145,7 +165,7 @@ class _Gateway:
 
         if chat.stream:
             return StreamingResponse(
-                self._stream(events, first, request_id),
+                self._stream(events, first, request_id, principal),
                 media_type="text/event-stream",
                 headers={
                     "x-request-id": request_id,
@@ -165,7 +185,7 @@ class _Gateway:
             error = exc.errors(include_url=False, include_input=False)[0]
             param = ".".join(str(p) for p in error["loc"]) or None
             return _error(400, error["msg"], "invalid_request_error", request_id, param=param)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             return _error(
                 400, "Request body is not valid JSON.", "invalid_request_error", request_id
             )
@@ -197,10 +217,24 @@ class _Gateway:
         )
 
     async def _stream(
+        self,
+        events: AsyncGenerator[ProviderEvent, None],
+        first: ProviderEvent,
+        request_id: str,
+        principal: str,
+    ) -> AsyncIterator[bytes]:
+        # Starlette iterates this generator after the handler (and its bind_context)
+        # has returned, so the log context is re-bound here for audit and errors.
+        with bind_context(request_id=request_id, principal=principal):
+            async for chunk in self._stream_body(events, first, request_id):
+                yield chunk
+
+    async def _stream_body(
         self, events: AsyncGenerator[ProviderEvent, None], first: ProviderEvent, request_id: str
     ) -> AsyncIterator[bytes]:
         completion_id, created = f"chatcmpl-{uuid.uuid4().hex}", int(time.time())
         redactor = StreamRedactor()
+        redactions = 0
         finish: Finish | None = None
         try:
             yield self._chunk(completion_id, created, {"role": "assistant", "content": ""}, None)
@@ -209,7 +243,13 @@ class _Gateway:
                 if isinstance(event, Finish):
                     finish = event
                     break
-                if safe := redactor.feed(event):
+                if isinstance(event, BlockEnd):
+                    # Each content block is redacted independently (see BlockEnd).
+                    if tail := redactor.flush():
+                        yield self._chunk(completion_id, created, {"content": tail}, None)
+                    redactions += redactor.redactions
+                    redactor = StreamRedactor()
+                elif safe := redactor.feed(event):
                     yield self._chunk(completion_id, created, {"content": safe}, None)
                 event = await anext(events, None)
             if tail := redactor.flush():
@@ -221,39 +261,21 @@ class _Gateway:
                 "provider failed mid-stream", extra={"kind": exc.kind, "detail": exc.detail}
             )
             yield _sse(
-                {
-                    "error": {
-                        "message": _PROVIDER_MESSAGE[exc.kind],
-                        "type": "provider_error",
-                        "code": None,
-                        "param": None,
-                        "request_id": request_id,
-                    }
-                }
+                {"error": _error_body(_PROVIDER_MESSAGE[exc.kind], "provider_error", request_id)}
             )
         except Exception:
             redactor.discard()
             log.exception("gateway failed mid-stream")
-            yield _sse(
-                {
-                    "error": {
-                        "message": "Internal error.",
-                        "type": "internal_error",
-                        "code": None,
-                        "param": None,
-                        "request_id": request_id,
-                    }
-                }
-            )
+            yield _sse({"error": _error_body("Internal error.", "internal_error", request_id)})
         finally:
             await events.aclose()  # also runs when the client disconnects
-            self._audit(redactor.redactions)
+            self._audit(redactions + redactor.redactions)
         yield _sse("[DONE]")
 
     async def _complete(
         self, events: AsyncGenerator[ProviderEvent, None], first: ProviderEvent, request_id: str
     ) -> Response:
-        parts: list[str] = []
+        blocks: list[list[str]] = [[]]
         finish = Finish("stop")
         try:
             event: ProviderEvent | None = first
@@ -261,14 +283,22 @@ class _Gateway:
                 if isinstance(event, Finish):
                     finish = event
                     break
-                parts.append(event)
+                if isinstance(event, BlockEnd):
+                    blocks.append([])
+                else:
+                    blocks[-1].append(event)
                 event = await anext(events, None)
         except ProviderError as exc:
             return _provider_error(exc, request_id)
+        except Exception:
+            log.exception("provider failed while collecting a non-streaming response")
+            return _error(500, "Internal error.", "internal_error", request_id)
         finally:
             await events.aclose()
-        text, count = redact_counted("".join(parts))
-        self._audit(count)
+        # Same rule as streaming: each content block is redacted independently.
+        redacted = [redact_counted("".join(parts)) for parts in blocks]
+        text = "".join(t for t, _ in redacted)
+        self._audit(sum(n for _, n in redacted))
         return JSONResponse(
             {
                 "id": f"chatcmpl-{uuid.uuid4().hex}",

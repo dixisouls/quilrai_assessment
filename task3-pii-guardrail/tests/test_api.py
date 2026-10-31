@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
@@ -11,11 +12,12 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from task3_pii_guardrail.api import create_app
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
-from task3_pii_guardrail.providers import Finish, ProviderError, ProviderEvent
+from task3_pii_guardrail.providers import BlockEnd, Finish, ProviderError, ProviderEvent
 
 API_KEY = secrets.token_urlsafe(24)  # generated per run; never a literal in the repo
 
@@ -80,7 +82,7 @@ def _sse_events(raw: str) -> list[Any]:
 
 def _content(events: list[Any]) -> str:
     return "".join(
-        e["choices"][0]["delta"].get("content") or ""
+        str(e["choices"][0]["delta"].get("content") or "")
         for e in events
         if isinstance(e, dict) and "choices" in e
     )
@@ -280,3 +282,87 @@ async def test_provider_stream_is_closed_when_the_response_completes(
 
 async def test_healthz(client: httpx.AsyncClient) -> None:
     assert (await client.get("/healthz")).json() == {"status": "ok"}
+
+
+# --- Review #4 regressions ----------------------------------------------------------
+
+
+async def test_values_at_text_block_boundaries_are_redacted(
+    client: httpx.AsyncClient, provider: FakeProvider
+) -> None:
+    # Separate content blocks (citations, fallback switch) must not merge into one
+    # digit run that defeats the card and SSN checks.
+    provider.script = [
+        "Card: 4111111111111111",
+        BlockEnd(),
+        "0 is the code. SSN 123-45-6789",
+        BlockEnd(),
+        "0 too.",
+        BlockEnd(),
+        Finish("stop"),
+    ]
+    streamed = _content(
+        _sse_events((await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)).text)
+    )
+    assert streamed == "Card: [REDACTED]0 is the code. SSN [REDACTED]0 too."
+    provider.script = list(provider.script)
+    whole = await client.post("/v1/chat/completions", json=_body(stream=False), headers=HEADERS)
+    assert whole.json()["choices"][0]["message"]["content"] == streamed
+
+
+async def test_deeply_nested_json_gets_a_400_envelope(client: httpx.AsyncClient) -> None:
+    resp = await client.post(
+        "/v1/chat/completions",
+        content=b"[" * 5000,
+        headers={**HEADERS, "content-type": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+    assert resp.json()["error"]["request_id"] == resp.headers["x-request-id"]
+
+
+async def test_streaming_audit_event_carries_request_and_principal(
+    client: httpx.AsyncClient, provider: FakeProvider, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider.script = ["mail a@b.io ok", Finish("stop")]
+    with caplog.at_level(logging.INFO):
+        resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    [record] = [r for r in caplog.records if getattr(r, "audit", None)]
+    audit = record.audit  # type: ignore[attr-defined]  # set by emit_audit
+    assert audit["request_id"] == resp.headers["x-request-id"]
+    assert audit["principal"] is not None and audit["principal"].startswith("key-")
+
+
+@pytest.mark.parametrize("retry_after", [float("inf"), float("nan"), -5.0, 1e12])
+async def test_hostile_retry_after_values_do_not_crash(
+    client: httpx.AsyncClient, provider: FakeProvider, retry_after: float
+) -> None:
+    provider.script = [ProviderError("rate_limited", "x", retry_after=retry_after)]
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.status_code == 429
+    assert "retry-after" not in resp.headers or resp.headers["retry-after"].isdigit()
+
+
+async def test_non_streaming_unexpected_error_gets_an_envelope(
+    client: httpx.AsyncClient, provider: FakeProvider
+) -> None:
+    provider.script = ["ok", RuntimeError("boom /srv/secret")]
+    resp = await client.post("/v1/chat/completions", json=_body(stream=False), headers=HEADERS)
+    assert resp.status_code == 500
+    assert resp.json()["error"]["type"] == "internal_error"
+    assert "secret" not in resp.text
+
+
+@pytest.mark.parametrize("token", [b"", b" ", b"\t", b"\xa0"])  # raw bytes, incl. an NBSP
+async def test_blank_bearer_tokens_are_rejected(client: httpx.AsyncClient, token: bytes) -> None:
+    resp = await client.post(
+        "/v1/chat/completions", json=_body(), headers={b"authorization": b"Bearer " + token}
+    )
+    assert resp.status_code == 401
+
+
+def test_short_or_empty_configured_keys_are_refused() -> None:
+    with pytest.raises(ValidationError):
+        GatewaySettings(api_keys=[""])
+    with pytest.raises(ValidationError):
+        GatewaySettings(api_keys=["short"])

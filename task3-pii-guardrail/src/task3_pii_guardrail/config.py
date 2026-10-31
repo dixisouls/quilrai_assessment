@@ -6,6 +6,8 @@ credential resolution; it is never stored in these settings.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,7 +16,7 @@ class GatewaySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LLM_GATEWAY_", extra="forbid", frozen=True)
 
     # Client API keys accepted by the gateway (JSON list in the environment).
-    api_keys: list[SecretStr] = Field(min_length=1)
+    api_keys: list[Annotated[SecretStr, Field(min_length=16)]] = Field(min_length=1)
 
     model: str = "claude-opus-5-5"
     default_max_tokens: int = Field(default=4096, ge=1, le=64_000)

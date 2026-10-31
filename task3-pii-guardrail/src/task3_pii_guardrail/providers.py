@@ -7,6 +7,7 @@ with a coarse ``kind``; provider-specific detail stays in the server log.
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
@@ -27,7 +28,16 @@ class Finish:
     reason: FinishReason
 
 
-type ProviderEvent = str | Finish
+@dataclass(frozen=True, slots=True)
+class BlockEnd:
+    """End of one content block. Text from different blocks (citations, a
+    fallback-model switch, ...) is concatenated for the client but must be
+    redacted independently: otherwise a card ending one block and a digit
+    starting the next merge into a single run that defeats the Luhn and
+    boundary checks."""
+
+
+type ProviderEvent = str | BlockEnd | Finish
 
 
 class ProviderError(Exception):
@@ -53,25 +63,44 @@ _STOP_REASONS: Final[dict[str | None, FinishReason]] = {
     "refusal": "content_filter",
 }
 _FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
+_MAX_RETRY_AFTER_S: Final = 3600.0
+
+
+def _retry_after(raw: str | None) -> float | None:
+    """Upstream is only semi-trusted: accept finite, non-negative, bounded values."""
+    try:
+        value = float(raw) if raw is not None else None
+    except ValueError:
+        return None
+    if value is None or not math.isfinite(value) or not 0 <= value <= _MAX_RETRY_AFTER_S:
+        return None
+    return value
 
 
 def _map_error(exc: anthropic.APIError) -> ProviderError:
     detail = f"{type(exc).__name__}: {exc}"
     if isinstance(exc, anthropic.RateLimitError):
-        retry = exc.response.headers.get("retry-after")
-        try:
-            retry_after = float(retry) if retry is not None else None
-        except ValueError:
-            retry_after = None
-        return ProviderError("rate_limited", detail, retry_after=retry_after)
+        return ProviderError(
+            "rate_limited",
+            detail,
+            retry_after=_retry_after(exc.response.headers.get("retry-after")),
+        )
     if isinstance(exc, anthropic.APITimeoutError):
         return ProviderError("timeout", detail)
     if isinstance(exc, anthropic.APIConnectionError):
         return ProviderError("unavailable", detail)
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code < 400:  # noqa: PLR2004
+        # An SSE `error` event inside a 200 stream: classify by the event's error type.
+        body = exc.body if isinstance(exc.body, dict) else {}
+        error = body.get("error") if isinstance(body.get("error"), dict) else body
+        kind = error.get("type") if isinstance(error, dict) else None
+        return ProviderError(
+            "rate_limited" if kind == "rate_limit_error" else "unavailable", detail
+        )
     if isinstance(exc, anthropic.APIStatusError) and exc.status_code < 500:  # noqa: PLR2004
         # 4xx other than 429: our request or credentials are wrong, not the caller's.
         return ProviderError("bad_request", detail)
-    return ProviderError("unavailable", detail)  # 5xx, 529 overloaded, stream error events
+    return ProviderError("unavailable", detail)  # 5xx and 529 overloaded
 
 
 class AnthropicProvider:
@@ -139,6 +168,8 @@ class AnthropicProvider:
             async for event in events:
                 if event.type == "content_block_delta" and event.delta.type == "text_delta":
                     yield event.delta.text
+                elif event.type == "content_block_stop":
+                    yield BlockEnd()
                 elif event.type == "message_delta" and event.delta.stop_reason is not None:
                     stop_reason = event.delta.stop_reason
         except anthropic.APIError as exc:
