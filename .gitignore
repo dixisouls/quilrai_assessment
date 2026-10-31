@@ -31,3 +31,4 @@ logs/
 .req-audit.txt
 reports/
 .coverage.*
+.claude/worktrees/
