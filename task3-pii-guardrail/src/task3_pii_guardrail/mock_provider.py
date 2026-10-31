@@ -7,6 +7,7 @@ the user message script failures:
 * ``[[status:429]]`` / ``[[status:529]]`` → error response with that status
 * ``[[slow]]`` → pause 1 s after the second delta (by then "You " is complete)
 * ``[[midstream-error]]`` → an ``overloaded_error`` event after a few deltas
+* ``[[blocks]]`` → three text blocks whose values meet at the block boundaries
 
 Run: ``python -m task3_pii_guardrail.mock_provider --port 9090`` and point the
 gateway at it with ``LLM_GATEWAY_ANTHROPIC_BASE_URL=http://127.0.0.1:9090``.
@@ -49,6 +50,11 @@ async def _messages(request: Request) -> Response:
             headers={"retry-after": "3"} if code == 429 else None,  # noqa: PLR2004
         )
     text = "You said: " + _MARKER.sub("", user).strip()
+    blocks = (
+        ["Card: 4111111111111111", "0 is the code. SSN 123-45-6789", "0 too."]
+        if "[[blocks]]" in user
+        else [text]
+    )
 
     async def events() -> AsyncIterator[bytes]:
         yield _event(
@@ -67,36 +73,37 @@ async def _messages(request: Request) -> Response:
                 },
             },
         )
-        yield _event(
-            "content_block_start",
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            },
-        )
         yield _event("ping", {"type": "ping"})
-        for n, i in enumerate(range(0, len(text), 3)):
+        for index, block in enumerate(blocks):
             yield _event(
-                "content_block_delta",
+                "content_block_start",
                 {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": text[i : i + 3]},
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "text", "text": ""},
                 },
             )
-            if n == 1 and "[[slow]]" in user:
-                await asyncio.sleep(1.0)
-            if n == 4 and "[[midstream-error]]" in user:  # noqa: PLR2004
+            for n, i in enumerate(range(0, len(block), 3)):
                 yield _event(
-                    "error",
+                    "content_block_delta",
                     {
-                        "type": "error",
-                        "error": {"type": "overloaded_error", "message": "Overloaded"},
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "text_delta", "text": block[i : i + 3]},
                     },
                 )
-                return
-        yield _event("content_block_stop", {"type": "content_block_stop", "index": 0})
+                if n == 1 and "[[slow]]" in user:
+                    await asyncio.sleep(1.0)
+                if n == 4 and "[[midstream-error]]" in user:  # noqa: PLR2004
+                    yield _event(
+                        "error",
+                        {
+                            "type": "error",
+                            "error": {"type": "overloaded_error", "message": "Overloaded"},
+                        },
+                    )
+                    return
+            yield _event("content_block_stop", {"type": "content_block_stop", "index": index})
         yield _event(
             "message_delta",
             {

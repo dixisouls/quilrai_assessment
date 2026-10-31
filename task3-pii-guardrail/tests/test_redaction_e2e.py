@@ -179,7 +179,18 @@ def test_midstream_provider_error_ends_cleanly(stack: Stack) -> None:
     events, _ = _stream_events(stack.url, "[[midstream-error]] tell me jane.doe@example.com")
     assert events[-1] == "[DONE]"
     assert events[-2]["error"]["type"] == "provider_error"
+    # An SSE error event inside a 200 stream is an outage, not "rejected the request".
+    assert events[-2]["error"]["message"] == "The model provider is unavailable."
     assert "jane" not in json.dumps(events)
+
+
+def test_values_meeting_at_real_content_block_boundaries_are_redacted(stack: Stack) -> None:
+    events, _ = _stream_events(stack.url, "[[blocks]]")
+    assert _text(events) == "Card: [REDACTED]0 is the code. SSN [REDACTED]0 too."
+    resp = httpx.post(
+        stack.url, json=_request("[[blocks]]", stream=False), headers=HEADERS, timeout=30
+    )
+    assert resp.json()["choices"][0]["message"]["content"] == _text(events)
 
 
 def test_wrong_key_is_rejected(stack: Stack) -> None:
