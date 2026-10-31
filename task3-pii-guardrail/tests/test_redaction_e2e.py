@@ -96,7 +96,8 @@ HEADERS = {"authorization": f"Bearer {API_KEY}"}
 
 
 def _stream_events(url: str, prompt: str) -> tuple[list[Any], list[float]]:
-    events, arrival = [], []
+    events: list[Any] = []
+    arrival: list[float] = []
     start = time.perf_counter()
     with httpx.stream("POST", url, json=_request(prompt), headers=HEADERS, timeout=30) as resp:
         assert resp.status_code == 200, resp.read()
@@ -110,7 +111,7 @@ def _stream_events(url: str, prompt: str) -> tuple[list[Any], list[float]]:
 
 def _text(events: list[Any]) -> str:
     return "".join(
-        e["choices"][0]["delta"].get("content") or ""
+        str(e["choices"][0]["delta"].get("content") or "")
         for e in events
         if isinstance(e, dict) and "choices" in e
     )
@@ -209,6 +210,7 @@ def test_live_anthropic_output_is_redacted(tmp_path: Path) -> None:
             stdout=subprocess.DEVNULL,
             stderr=log,
             env=env,
+            text=True,
         )
     try:
         _wait(f"http://127.0.0.1:{port}/healthz", gateway)
