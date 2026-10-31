@@ -23,9 +23,10 @@ internal headers (``Set-Cookie``, ``Server``, …) never reach the client.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, Final
 
 import httpx
@@ -268,12 +269,26 @@ async def _healthz(_request: Request) -> JSONResponse:
 
 
 def create_app(
-    settings: GatewaySettings, verifier: TokenVerifier, client: httpx.AsyncClient
+    settings: GatewaySettings,
+    verifier: TokenVerifier,
+    client: httpx.AsyncClient,
+    *,
+    close_client_on_shutdown: bool = False,
 ) -> Starlette:
     gateway = _Gateway(settings, verifier, client)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            if close_client_on_shutdown:
+                await client.aclose()
+
     return Starlette(
         routes=[
             Route("/mcp", gateway.handle, methods=["POST", "GET", "DELETE"]),
             Route("/healthz", _healthz, methods=["GET"]),
-        ]
+        ],
+        lifespan=lifespan,
     )
