@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,7 +17,7 @@ from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
 from task3_pii_guardrail.providers import Finish, ProviderError, ProviderEvent
 
-API_KEY = "test-key-0123456789abcdef"
+API_KEY = secrets.token_urlsafe(24)  # generated per run; never a literal in the repo
 
 
 @dataclass

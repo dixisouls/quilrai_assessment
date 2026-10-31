@@ -24,10 +24,11 @@ client ──OpenAI-style request──► gateway ──Anthropic SDK (stream)�
 ```bash
 uv sync
 export ANTHROPIC_API_KEY=...                         # read by the Anthropic SDK
-LLM_GATEWAY_API_KEYS='["your-client-key"]' uv run python -m task3_pii_guardrail   # :8090
+export CLIENT_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+LLM_GATEWAY_API_KEYS="[\"$CLIENT_KEY\"]" uv run python -m task3_pii_guardrail   # :8090
 
 curl -N http://127.0.0.1:8090/v1/chat/completions \
-  -H 'authorization: Bearer your-client-key' -H 'content-type: application/json' \
+  -H "authorization: Bearer $CLIENT_KEY" -H 'content-type: application/json' \
   -d '{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"Hi"}]}'
 ```
 

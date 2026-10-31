@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-API_KEY = "it-key-0123456789abcdef"
+API_KEY = secrets.token_urlsafe(24)  # generated per run; never a literal in the repo
 
 
 def _free_port() -> int:
