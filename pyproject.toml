@@ -71,7 +71,8 @@ known-first-party = ["quilr_common", "task1_mcp_server", "task2_mcp_gateway", "c
 [tool.ruff.lint.per-file-ignores]
 # assert is the pytest idiom; magic values are fine in test expectations.
 # TRY301: tests raise inside try on purpose to exercise exception logging.
-"**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301"]
+# PLR0917: pytest injects fixtures positionally; parametrized tests need several.
+"**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301", "PLR0917"]
 
 [tool.mypy]
 strict = true
