@@ -43,6 +43,11 @@ from typing import Final
 REDACTED: Final = "[REDACTED]"
 MAX_HOLDBACK: Final = 2048
 _KEEP_ON_FORCED_CUT: Final = 1024
+# Longest string any pattern can match: an email is 64 + "@" + 63 + 8 * (1 + 63)
+# + 1 + 24 = 665 chars (cards and SSNs are far shorter). The forced-cut search
+# window must cover a whole match on either side of the cut.
+_MAX_MATCH: Final = 64 + 1 + 63 + 8 * (1 + 63) + 1 + 24
+_FORCED_CUT_WINDOW: Final = _MAX_MATCH + 16
 
 _CANDIDATE: Final = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._%+@-"
@@ -210,8 +215,9 @@ class StreamRedactor:
     def _forced_cut(buf: str) -> int:
         """Cut an over-long run, never through a complete match."""
         cut = len(buf) - _KEEP_ON_FORCED_CUT
+        lo, hi = max(0, cut - _FORCED_CUT_WINDOW), min(len(buf), cut + _FORCED_CUT_WINDOW)
         for pattern, _ in _RULES:
-            for m in pattern.finditer(buf, max(0, cut - 400), min(len(buf), cut + 400)):
+            for m in pattern.finditer(buf, lo, hi):
                 if m.start() < cut < m.end():
                     cut = m.start()
         return cut

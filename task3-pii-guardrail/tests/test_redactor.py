@@ -205,3 +205,15 @@ def test_discard_drops_a_held_partial_value() -> None:
     assert redactor.feed("Contact jane.do") == "Contact "
     redactor.discard()
     assert redactor.flush() == ""
+
+
+# --- Review #4 regressions ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("pad", [900, 950, 1000])
+@pytest.mark.parametrize("size", [1, 4, 64])
+def test_forced_cut_never_splits_a_long_email(pad: int, size: int) -> None:
+    domain = ".".join("d" * 60 for _ in range(9)) + ".com"
+    text = "start " + "x" * pad + "@" + f"victim.secret@{domain}" + "-" + "y" * 1500 + " end"
+    assert "victim.secret" not in redact_all(text)
+    assert "victim.secret" not in stream([text[i : i + size] for i in range(0, len(text), size)])
