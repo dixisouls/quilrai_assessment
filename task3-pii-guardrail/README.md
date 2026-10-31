@@ -76,13 +76,19 @@ boundary no match can cross, so it is redacted and emitted immediately.
 |---|---|---|
 | **Correct for any chunking** | The cut is always at a boundary, and the patterns use `re.ASCII`, so `\b` and lookarounds evaluate the same as on the whole text | Property test: any chunking gives the same output as `redact_all(whole_text)`; a 20,000-case random stress run (incl. non-ASCII) matched 20000/20000 |
 | **Low latency** | In prose the held text is just the current word: `"The quick "` leaves at once, while `"jum"` waits for its boundary | `test_prose_is_released_as_soon_as_each_word_ends`; TTFT test over real sockets |
-| **Bounded memory** | Hold-back capped at **2048 chars**. Longer unbroken runs (base64 blobs) are force-emitted in 1 KB blocks, moving the cut so it never splits a complete match. The forced path can only over-redact, never leak. | 1 MB with no boundary: hold-back never exceeds the cap |
+| **Bounded memory** | Hold-back capped at **2048 chars**. Longer unbroken runs (base64 blobs) are force-emitted in 1 KB blocks. The cut is moved so it never splits a complete match, searching a window longer than the longest possible match (665 chars). The forced path can only over-redact, never leak. | 1 MB with no boundary: hold-back never exceeds the cap; a 665-char email straddling the cut is still redacted |
 | **Linear cost** | `feed()` scans only the new chunk plus one held character. Each emitted region is regex-scanned once. Bounded quantifiers and anchored starts mean no quadratic re-scanning | 120 KB in 4-char chunks < 2 s; hostile inputs (`"a"*50k`, `"@"*50k`) < 1 s |
 
 **Detection rules.**
 - Emails: a practical RFC 5322 subset.
 - SSNs: `ddd-dd-dddd` or space-separated, excluding never-issued ranges (`000`, `666`, `9xx`, group `00`, serial `0000`).
 - Cards: 13–19 digits passing the **Luhn checksum**, either unseparated or in a real PAN layout (one separator style, groups of 3 or more digits). That avoids flagging order numbers and SSN pairs, while still catching a card followed by its CVV group.
+
+**Content blocks are redacted independently.** A Claude response can have
+several text blocks (citations, a refusal-fallback switch). They are
+concatenated for the client, but each block goes through its own redactor.
+Otherwise a card ending one block and a digit starting the next would merge
+into one run that fails the Luhn and boundary checks.
 
 **Mid-stream failure:** held text is **discarded, not flushed**. A held
 `"jane.do"` can no longer be identified once the rest of the stream is lost,
@@ -145,9 +151,9 @@ RUN_LIVE_TESTS=1 ANTHROPIC_API_KEY=... uv run pytest task3-pii-guardrail -m live
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| `test_redactor.py` | 35 | Every pattern; false positives avoided; every split point; char-by-char; **any chunking equals whole text (Hypothesis)**; word-level latency; bounded memory; linear and hostile-input timing; discard; exact counts |
-| `test_api.py` | 23 | OpenAI chunk format; redaction across provider chunks; error mapping and sanitising; mid-stream failure with discard; auth; validation with `param`; provider stream always closed |
-| `test_redaction_e2e.py` | 7 (+1 live) | **Real processes and sockets through the real Anthropic SDK**: streaming and non-streaming redaction, audit count, no PII in logs, TTFT before a provider pause, 429/502 mapping, mid-stream failure, auth |
+| `test_redactor.py` | 44 | Every pattern; false positives avoided; every split point; char-by-char; **any chunking equals whole text (Hypothesis)**; word-level latency; bounded memory; linear and hostile-input timing; discard; exact counts |
+| `test_api.py` | 36 | OpenAI chunk format; redaction across provider chunks **and content blocks**; error mapping and sanitising (incl. hostile `Retry-After`, deep nesting); mid-stream failure with discard; audit event carries request id and principal; auth incl. blank/NBSP tokens; validation with `param`; provider stream always closed |
+| `test_redaction_e2e.py` | 8 (+1 live) | **Real processes and sockets through the real Anthropic SDK**: streaming and non-streaming redaction, audit count, no PII in logs, TTFT before a provider pause, 429/502 mapping, mid-stream failure, auth |
 
 The TTFT test lives in the e2e suite on purpose: httpx's in-process
 `ASGITransport` buffers whole responses, so latency can only be observed over
@@ -158,6 +164,12 @@ a real socket.
 - **Pattern-based detection.** It covers the three types the brief names
   (emails, US SSNs, card numbers). Names, addresses, phone numbers and
   non-US identifiers need NER/ML classifiers (QuilrAI's "custom intents").
+- **ASCII matching.** Patterns use `re.ASCII` (needed for chunk-invariant
+  boundaries), so full-width digits or a zero-width character inside a value
+  (`jane<U+200B>@example.com`) evade detection, in whole-text and streaming
+  mode alike. Normalising the text first would be the next step.
+- **Length caps.** Emails with a local part over 64 characters or a domain
+  label over 63 (beyond RFC limits) are not matched.
 - **Truncated output.** If the model stops at `max_tokens` mid-value
   (`"jane.do"`), the fragment no longer matches and is emitted as-is, exactly
   as whole-text redaction would treat it.
