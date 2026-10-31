@@ -4,7 +4,11 @@ Independent reviews sometimes find problems outside the step under review.
 They aren't fixed out of order. Each one is recorded here, with the task that
 should handle it, and taken up when that task starts.
 
-## For Task 3: streaming PII redaction (reuses `quilr_common.redaction`)
+## Shared logging redaction (`quilr_common.redaction`), to schedule with the user
+
+Originally assigned to Task 3. Task 3 instead built its own streaming
+redactor (`task3_pii_guardrail/redactor.py`, linear and chunk-invariant), so
+these findings about the *logging* redaction are still open:
 
 From review #1 (`MISTAKES.md`, "Independent review #1"):
 
