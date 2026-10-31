@@ -191,3 +191,17 @@ def test_any_chunking_gives_the_same_output_as_whole_text(
 def test_arbitrary_unicode_never_crashes_and_is_chunk_invariant(text: str) -> None:
     third = len(text) // 3
     assert stream([text[:third], text[third : 2 * third], text[2 * third :]]) == redact_all(text)
+
+
+def test_redactions_are_counted_exactly() -> None:
+    redactor = StreamRedactor()
+    out = redactor.feed("a@b.io, 4111 1111 1111 1111, order 1234567890123456, [REDACTED] ")
+    out += redactor.flush()
+    assert redactor.redactions == 2  # the literal marker and the non-card digits don't count
+
+
+def test_discard_drops_a_held_partial_value() -> None:
+    redactor = StreamRedactor()
+    assert redactor.feed("Contact jane.do") == "Contact "
+    redactor.discard()
+    assert redactor.flush() == ""

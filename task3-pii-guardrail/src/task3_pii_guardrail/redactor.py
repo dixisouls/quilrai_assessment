@@ -109,13 +109,23 @@ _RULES: Final[tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
 )
 
 
-def redact_all(text: str) -> str:
-    """Redact a complete text. The reference result streaming must reproduce."""
+def redact_counted(text: str) -> tuple[str, int]:
+    """Redact a complete text; also return how many values were replaced."""
+    count = 0
     for pattern, repl in _RULES:
         if pattern is _EMAIL and "@" not in text:
             continue
-        text = pattern.sub(repl, text)
-    return text
+        redacted = pattern.sub(repl, text)
+        # Markers added by this rule. Not subn(): the card rule may "replace" a
+        # candidate with itself, and the input may already contain the marker.
+        count += redacted.count(REDACTED) - text.count(REDACTED)
+        text = redacted
+    return text, count
+
+
+def redact_all(text: str) -> str:
+    """Redact a complete text. The reference result streaming must reproduce."""
+    return redact_counted(text)[0]
 
 
 class StreamRedactor:
@@ -124,6 +134,7 @@ class StreamRedactor:
     def __init__(self) -> None:
         self._pending = ""
         self._closed = False
+        self.redactions = 0  # values replaced so far (for audit; never the values)
 
     @property
     def pending_chars(self) -> int:
@@ -140,14 +151,29 @@ class StreamRedactor:
         if len(buf) - cut > MAX_HOLDBACK:
             cut = self._forced_cut(buf)
         self._pending = buf[cut:]
-        return redact_all(buf[:cut]) if cut else ""
+        return self._redact(buf[:cut]) if cut else ""
 
     def flush(self) -> str:
         """End of stream: redact and return whatever is still held."""
         if self._closed:
             return ""
         self._closed = True
-        out, self._pending = redact_all(self._pending), ""
+        out, self._pending = self._redact(self._pending), ""
+        return out
+
+    def discard(self) -> None:
+        """Abort: drop held text *without* emitting it.
+
+        Used when the upstream stream fails mid-way. Held text may be the start
+        of a value (``"jane.do"``) that only the rest of the stream would have
+        identified, so flushing it would leak a fragment of PII.
+        """
+        self._closed = True
+        self._pending = ""
+
+    def _redact(self, text: str) -> str:
+        out, count = redact_counted(text)
+        self.redactions += count
         return out
 
     # --- internals ------------------------------------------------------------------
