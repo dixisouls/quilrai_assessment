@@ -309,3 +309,35 @@ in-scope findings (3 MEDIUM, 3 LOW), all now fixed with regression tests, and
 - The reviewer noted that a broad `pkill -f task2_mcp_gateway` (which I also
   used during the live demo) could kill a user's own gateway. From now on I
   stop processes by PID.
+
+## Task 3 — LLM gateway streaming guardrail
+
+### P1 — Piped a gate's output and committed past a failure
+- **What happened:** I ran `mypy | tail -1` inside an `&&` chain. mypy failed
+  (two `test_integration.py` modules collided), but the chain saw `tail`'s
+  exit code and four commits went ahead. Fixing the collision then exposed a
+  real type error that the masked run had hidden too.
+- **Fix:** renamed the module to `test_redaction_e2e.py` and fixed the
+  `Popen` typing. Nothing had been pushed; CI would have caught it.
+- **Prevention:** never pipe a gate inside an `&&` chain. Run gates unpiped
+  and end with an explicit `echo "ALL GATES PASSED"`.
+
+### P2 — Test transport that silently buffers
+- **What happened:** the in-process TTFT test failed. The cause wasn't the
+  gateway: `httpx.ASGITransport` collects the whole response before returning
+  it, which a 6-line probe confirmed.
+- **Fix:** latency is tested only over real sockets (the e2e suite).
+
+### P3 — Two wrong expectations, both caught by tests
+- The card rule matched `000-12-3456 666…` (13 digits across mixed separators
+  that happened to pass Luhn). Fixed by requiring a real PAN layout.
+- The first TTFT scenario paused the mock after `"You"`, which correctly
+  can't be released yet (it could still become `You@x.com`). The test was
+  wrong, not the redactor; the mock now pauses after `" sa"`.
+
+### P4 — Two sloppy edits of my own
+- A redaction counter counted `[REDACTED]` in the final text, which
+  over-counts when the model's output already contains the marker. It now
+  counts markers added per rule.
+- A benchmark printout contained a hardcoded "max holdback seen" claim I
+  hadn't measured. It's not quoted anywhere; the bound is enforced by a test.
