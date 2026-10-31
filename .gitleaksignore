@@ -1,0 +1,8 @@
+# Historical findings only: fake test keys and a README placeholder that were
+# committed on task/3-pii-guardrail before tests switched to keys generated at
+# runtime. Fingerprints pin commit + file + rule + line, so any NEW occurrence
+# anywhere is still reported. Rewriting the already-pushed history would need a
+# force-push, so these are acknowledged here instead.
+d5a6cc3d4e0eefd47826a716581fd769e66d5ccb:task3-pii-guardrail/tests/test_integration.py:generic-api-key:25
+d0ef2533196e47de03ed96f65ceb09383216a46e:task3-pii-guardrail/tests/test_api.py:generic-api-key:19
+2a59e200cd3e0b6912d6a1b41f4081a00205f210:task3-pii-guardrail/README.md:curl-auth-header:29
