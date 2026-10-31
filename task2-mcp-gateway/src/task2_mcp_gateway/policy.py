@@ -26,6 +26,8 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Final
 
+from mcp.shared.inbound import decode_header_value
+
 from task2_mcp_gateway.auth import Principal, Role
 from task2_mcp_gateway.jsonrpc import (
     INVALID_PARAMS,
@@ -106,8 +108,10 @@ def authorize(principal: Principal, msg: Message, headers: Mapping[str, str]) ->
             id=msg.id,
             details=_detail("params.name", "must be a string", "string_type"),
         )
-    header_name = headers.get("mcp-name")
-    if header_name is not None and header_name != name:
+    raw_header_name = headers.get("mcp-name")
+    # Decode exactly like the SDK server does (=?base64?...?= wrapper). A malformed
+    # wrapper decodes to None and therefore never matches (fail closed).
+    if raw_header_name is not None and decode_header_value(raw_header_name) != name:
         raise JsonRpcError(
             INVALID_REQUEST, "Invalid Request: Mcp-Name header does not match the body", id=msg.id
         )

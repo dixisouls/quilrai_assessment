@@ -24,7 +24,6 @@ internal headers (``Set-Cookie``, ``Server``, …) never reach the client.
 from __future__ import annotations
 
 import contextlib
-import json
 import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Final
@@ -32,6 +31,7 @@ from typing import Any, Final
 import httpx
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
@@ -42,11 +42,13 @@ from quilr_common.log import (
     bind_context,
     emit_audit,
     get_logger,
+    new_request_id,
     sanitize_request_id,
 )
 from task2_mcp_gateway.auth import AuthError, Principal, TokenVerifier
 from task2_mcp_gateway.config import GatewaySettings
 from task2_mcp_gateway.jsonrpc import (
+    INTERNAL_ERROR,
     INVALID_REQUEST,
     JsonRpcError,
     JsonRpcId,
@@ -56,6 +58,9 @@ from task2_mcp_gateway.jsonrpc import (
 from task2_mcp_gateway.policy import UNAUTHORIZED_TOOL_CALL, authorize
 
 log = get_logger(__name__)
+
+_ALLOWED_HTTP_METHODS: Final = frozenset({"POST", "GET", "DELETE"})
+_REFUSED_HTTP_METHODS: Final = ("HEAD", "OPTIONS", "PUT", "PATCH")
 
 AUTHENTICATION_REQUIRED: Final = -32000
 DOWNSTREAM_UNAVAILABLE: Final = -32002
@@ -120,7 +125,22 @@ class _Gateway:
         request_id = sanitize_request_id(request.headers.get("x-request-id"))
         started = time.perf_counter()
         with bind_context(request_id=request_id):
-            response = await self._handle(request, request_id)
+            if request.method not in _ALLOWED_HTTP_METHODS:
+                # Starlette implicitly adds HEAD to GET routes; refuse it like any other.
+                response: Response = _error(
+                    405,
+                    INVALID_REQUEST,
+                    "Method not allowed",
+                    request_id,
+                    headers={"allow": ", ".join(sorted(_ALLOWED_HTTP_METHODS))},
+                )
+            else:
+                try:
+                    response = await self._handle(request, request_id)
+                except Exception:
+                    # Never a bare 500: the client gets the envelope, the log gets the trace.
+                    log.exception("unhandled error in gateway")
+                    response = _error(500, INTERNAL_ERROR, "Internal error", request_id)
             log.info(
                 "request handled",
                 extra={
@@ -162,7 +182,7 @@ class _Gateway:
                 200, exc.code, exc.message, request_id, rpc_id=exc.id, details=exc.details
             )
         self._audit_decision(principal, msg, None)
-        return await self._forward(request, msg, _canonical(msg), request_id)
+        return await self._forward(request, msg, msg.canonical, request_id)
 
     # --- steps --------------------------------------------------------------------
 
@@ -259,13 +279,16 @@ class _Gateway:
         )
 
 
-def _canonical(msg: Message) -> bytes:
-    """The exact message that was authorized, re-serialised for downstream."""
-    return json.dumps(msg.raw, separators=(",", ":"), ensure_ascii=False).encode()
-
-
 async def _healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+async def _http_error(_request: Request, exc: Exception) -> Response:
+    """Unknown path (404) or method (405) from the router: same envelope as everything else."""
+    assert isinstance(exc, HTTPException)  # noqa: S101 - registered for HTTPException only
+    request_id = new_request_id()
+    message = "Not found" if exc.status_code == 404 else "Method not allowed"  # noqa: PLR2004
+    return _error(exc.status_code, INVALID_REQUEST, message, request_id, headers=exc.headers)
 
 
 def create_app(
@@ -285,10 +308,15 @@ def create_app(
             if close_client_on_shutdown:
                 await client.aclose()
 
-    return Starlette(
+    app = Starlette(
         routes=[
-            Route("/mcp", gateway.handle, methods=["POST", "GET", "DELETE"]),
+            # HEAD/OPTIONS/PUT/... are routed in too, so the handler can refuse them
+            # with the gateway's own envelope instead of Starlette's plain text.
+            Route("/mcp", gateway.handle, methods=[*_ALLOWED_HTTP_METHODS, *_REFUSED_HTTP_METHODS]),
             Route("/healthz", _healthz, methods=["GET"]),
         ],
+        exception_handlers={HTTPException: _http_error},
         lifespan=lifespan,
     )
+    app.router.redirect_slashes = False  # /mcp/ is a 404, not a redirect to /mcp
+    return app

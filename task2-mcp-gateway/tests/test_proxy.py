@@ -17,6 +17,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+import task2_mcp_gateway.proxy as proxy_mod
 from task2_mcp_gateway.auth import TokenVerifier
 from task2_mcp_gateway.config import GatewaySettings
 from task2_mcp_gateway.proxy import create_app
@@ -379,3 +380,43 @@ async def test_safe_client_request_id_is_kept_and_forwarded(
 async def test_healthz(client: httpx.AsyncClient) -> None:
     resp = await client.get("/healthz")
     assert (resp.status_code, resp.json()) == (200, {"status": "ok"})
+
+
+# --- Review regressions --------------------------------------------------------
+
+
+async def test_unexpected_errors_get_the_envelope_not_a_bare_500(
+    client: httpx.AsyncClient, mint: Minter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("internal detail /srv/secret")
+
+    monkeypatch.setattr(proxy_mod, "authorize", boom)
+    resp = await client.post("/mcp", json=_rpc("tools/list", 3), headers=_auth(mint))
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["error"]["code"] == -32603
+    assert body["error"]["message"] == "Internal error"
+    assert body["error"]["data"]["request_id"] == resp.headers["x-request-id"]
+    assert "secret" not in resp.text
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "PUT", "PATCH"])
+async def test_other_http_methods_are_refused_at_the_gateway(
+    client: httpx.AsyncClient, downstream: RecordingDownstream, mint: Minter, method: str
+) -> None:
+    resp = await client.request(method, "/mcp", headers={"authorization": f"Bearer {mint()}"})
+    assert resp.status_code == 405
+    assert "x-request-id" in resp.headers
+    if method != "HEAD":
+        assert resp.json()["error"]["data"]["request_id"] == resp.headers["x-request-id"]
+    assert downstream.requests == []
+
+
+async def test_unknown_paths_are_404_with_envelope_and_no_redirect(
+    client: httpx.AsyncClient,
+) -> None:
+    for path in ("/mcp/", "/admin", "/"):
+        resp = await client.post(path, json=_rpc("tools/list"))
+        assert resp.status_code == 404, path
+        assert resp.json()["error"]["data"]["request_id"] == resp.headers["x-request-id"]

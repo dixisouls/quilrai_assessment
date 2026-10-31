@@ -225,3 +225,49 @@ def test_standard_notifications_pass_and_unknown_ones_do_not() -> None:
 
 def test_client_responses_to_server_requests_are_forwarded() -> None:
     authorize(VIEWER, parse_message(_msg({"jsonrpc": "2.0", "id": "srv-1", "result": {}})), {})
+
+
+# --- Review regressions --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body", [b"[" * 100_000 + b"]" * 100_000, b'{"a":' * 100_000 + b"1" + b"}" * 100_000]
+)
+def test_pathological_nesting_is_rejected_not_a_crash(body: bytes) -> None:
+    assert _parse_error(body).code == -32600
+
+
+def test_lone_surrogates_are_rejected() -> None:
+    body = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        b'"params":{"name":"get_status","arguments":{"x":"\\ud800"}}}'
+    )
+    err = _parse_error(body)
+    assert (err.code, err.id) == (-32600, 1)
+
+
+@pytest.mark.parametrize("number", [b"1e400", b"-1e400"])
+def test_numbers_that_overflow_to_infinity_are_rejected(number: bytes) -> None:
+    body = (
+        b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_status","arguments":{"x":'
+        + number
+        + b"}}}"
+    )
+    assert _parse_error(body).code == -32600
+
+
+def test_message_carries_the_exact_bytes_to_forward() -> None:
+    raw = b'{ "jsonrpc" : "2.0", "id":1,  "method":"tools/list" }'
+    assert parse_message(raw).canonical == b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+
+def test_base64_encoded_mcp_name_header_is_decoded_like_the_sdk() -> None:
+    authorize(
+        VIEWER, parse_message(_call("get_status")), {"mcp-name": "=?base64?Z2V0X3N0YXR1cw==?="}
+    )
+    # Encoded admin name, plain body: still a mismatch.
+    err = _deny(VIEWER, _call("get_status"), {"mcp-name": "=?base64?YWRtaW5fcmVzZXRfa2V5?="})
+    assert err.code == -32600
+    # A malformed sentinel never matches anything (fail closed).
+    err = _deny(VIEWER, _call("get_status"), {"mcp-name": "=?base64?!!!?="})
+    assert err.code == -32600

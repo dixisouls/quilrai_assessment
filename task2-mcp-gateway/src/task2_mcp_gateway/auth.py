@@ -125,8 +125,8 @@ class TokenVerifier:
         token = self._extract(authorization)
         try:
             header = jwt.get_unverified_header(token)
-        except jwt.DecodeError as exc:
-            raise AuthError("malformed", f"undecodable JWT header: {type(exc).__name__}") from None
+        except jwt.InvalidTokenError as exc:  # DecodeError, bad kid/crit types, ...
+            raise AuthError("malformed", f"unusable JWT header: {exc}") from None
         alg = header.get("alg")
         if alg not in self._algorithms:
             raise AuthError("invalid", f"algorithm {alg!r} not allowed")

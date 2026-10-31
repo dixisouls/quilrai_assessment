@@ -10,11 +10,15 @@ module rejects everything ambiguous instead of guessing:
 * **Batches** (top-level arrays) → ``-32600``. MCP removed JSON-RPC batching
   in 2025-06-18, and inspecting each element of a batch is a classic
   smuggling surface.
-* Nesting deeper than :data:`MAX_DEPTH` → ``-32600``.
+* Nesting deeper than :data:`MAX_DEPTH` → ``-32600`` (including nesting so deep
+  the parser itself would recurse out).
+* Anything that can't be re-encoded as strict JSON, such as lone surrogates
+  (``"\\ud800"``) or numbers that overflow to infinity (``1e400``) →
+  ``-32600``.
 
-The gateway also forwards the *re-serialised* parsed object rather than the
-client's raw bytes (see ``proxy.py``), so downstream sees exactly what was
-authorized.
+:attr:`Message.canonical` holds the exact bytes the gateway forwards: the
+parsed object re-serialised as strict JSON, never the client's raw bytes.
+Downstream therefore sees exactly what was authorized.
 """
 
 from __future__ import annotations
@@ -58,6 +62,7 @@ class Message:
     id: JsonRpcId | None
     method: str | None
     params: dict[str, Any] | None
+    canonical: bytes = field(repr=False)
 
     @property
     def is_request(self) -> bool:
@@ -114,6 +119,8 @@ def parse_message(body: bytes) -> Message:
         obj = json.loads(body, object_pairs_hook=_no_duplicates, parse_constant=_reject_constant)
     except _DuplicateKeyError:
         raise JsonRpcError(INVALID_REQUEST, "Invalid Request: duplicate JSON keys") from None
+    except RecursionError:
+        raise JsonRpcError(INVALID_REQUEST, "Invalid Request: nested too deeply") from None
     except (ValueError, UnicodeDecodeError):
         raise JsonRpcError(PARSE_ERROR, "Parse error") from None
 
@@ -128,6 +135,14 @@ def parse_message(body: bytes) -> Message:
         raise JsonRpcError(INVALID_REQUEST, "Invalid Request: nested too deeply", id=rid)
     if obj.get("jsonrpc") != "2.0":
         raise JsonRpcError(INVALID_REQUEST, 'Invalid Request: jsonrpc must be "2.0"', id=rid)
+    try:
+        canonical = json.dumps(
+            obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (ValueError, UnicodeEncodeError):
+        raise JsonRpcError(
+            INVALID_REQUEST, "Invalid Request: not representable as strict JSON", id=rid
+        ) from None
 
     if "method" in obj:
         method = obj["method"]
@@ -136,7 +151,7 @@ def parse_message(body: bytes) -> Message:
         params = obj.get("params")
         if "params" in obj and not isinstance(params, dict):
             raise JsonRpcError(INVALID_REQUEST, "Invalid Request: params must be an object", id=rid)
-        return Message(raw=obj, id=rid, method=method, params=params)
+        return Message(raw=obj, id=rid, method=method, params=params, canonical=canonical)
 
     # A client's response to a server-initiated request (sampling, elicitation, ...).
     if rid is None or ("result" in obj) == ("error" in obj):
@@ -145,4 +160,4 @@ def parse_message(body: bytes) -> Message:
             "Invalid Request: needs a method, or an id with result or error",
             id=rid,
         )
-    return Message(raw=obj, id=rid, method=None, params=None)
+    return Message(raw=obj, id=rid, method=None, params=None, canonical=canonical)

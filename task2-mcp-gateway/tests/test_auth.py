@@ -207,3 +207,25 @@ def test_symmetric_keys_in_jwks_are_refused() -> None:
 def test_verifier_requires_at_least_one_key() -> None:
     with pytest.raises(ValueError, match="at least one"):
         TokenVerifier.from_pem([], issuer=ISSUER, audience=AUDIENCE)
+
+
+# --- Review regressions --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"alg": "ES256", "kid": 123},
+        {"alg": "ES256", "crit": ["exp"]},
+        {"alg": "ES256", "crit": "x"},
+        {"alg": "ES256", "crit": []},
+    ],
+)
+def test_hostile_jose_headers_are_malformed_not_crashes(
+    verifier: TokenVerifier, header: dict[str, object]
+) -> None:
+    def b64(obj: object) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    token = f"{b64(header)}.{b64({})}.c2ln"
+    assert _reason(verifier, f"Bearer {token}") == "malformed"
