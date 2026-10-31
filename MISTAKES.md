@@ -226,3 +226,46 @@ notes are in `BACKLOG.md`.
 - The amount-precision claim ("money never touches float") was overstated.
   The SDK parses floats before validation, which is now documented with
   tests.
+
+## Task 2 — MCP security gateway
+
+### G1 — Over-scoping (a process correction from the user, recorded here)
+- **What happened:** before Task 2 the user asked whether the repo had grown
+  too large for an assignment. Some foundation work (the HMAC audit chain, the
+  breadth of CI) goes beyond what reviewers score.
+- **Fix:** from Task 2 on, build exactly the brief plus the security
+  essentials. Extras are documented under known limitations instead of built.
+- **Prevention:** ask "does a reviewer score this?" before adding anything.
+
+### G2 — Order-dependent edits to `pyproject.toml`
+- **What happened:** a scripted substring replacement for `testpaths` also
+  matched the mypy `files` line, so the later replacement for `files` no
+  longer matched and the script aborted.
+- **Fix:** replace whole lines by exact match, and assert every expected hit.
+- **Prevention:** when editing config programmatically, replace whole lines,
+  not shared substrings.
+
+### G3 — Test infrastructure bugs caught by strict pytest settings
+- **What happened:** three test-side problems: a relative import from
+  `conftest` that importlib mode can't resolve; an `InsecureKeyLengthWarning`
+  from building a forged HS256 token with a 6-byte placeholder secret; and an
+  unread stderr pipe on a spawned process (`ResourceWarning`).
+  `filterwarnings = error` turned the last two into failures instead of noise.
+- **Fix:** constants are declared in the test module, the forged token is built
+  by hand (closer to a real attack anyway), and process logs go to files.
+
+### G4 — Escape sequences decoded into look-alike characters (fourth time)
+- **What happened:** full-width letters and the Kelvin sign in
+  `test_policy.py` and `policy.py` were written as literal characters. They
+  aren't "dangerous" to `check_bidi.py`, but they are visually
+  indistinguishable from ASCII, which is exactly what the tests are about.
+- **Fix:** a script re-escaped every non-ASCII character. Both files are now
+  pure ASCII.
+- **Prevention:** after writing any file with non-ASCII test data, assert
+  `isascii()`.
+
+### G5 — Demo script broke because zsh doesn't word-split variables
+- **What happened:** the first live demo returned 415 everywhere. `$H` holding
+  several `-H` flags reached curl as a single argument under zsh.
+- **Fix:** the demo is a bash script using arrays. The gateway's 415 was the
+  correct answer to a request with no valid content type.
