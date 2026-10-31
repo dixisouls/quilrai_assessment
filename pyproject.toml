@@ -3,7 +3,7 @@ name = "quilr-assessment"
 version = "0.1.0"
 description = "QuilrAI assessment: MCP server, MCP security gateway, LLM gateway guardrails and routing"
 requires-python = ">=3.12,<3.13"
-dependencies = ["quilr-common", "task1-mcp-server"]
+dependencies = ["quilr-common", "task1-mcp-server", "task2-mcp-gateway"]
 
 [dependency-groups]
 dev = [
@@ -23,17 +23,18 @@ package = false
 required-version = "==0.13.6"
 
 [tool.uv.workspace]
-members = ["common", "task1-mcp-server"]
+members = ["common", "task1-mcp-server", "task2-mcp-gateway"]
 
 [tool.uv.sources]
 quilr-common = { workspace = true }
 task1-mcp-server = { workspace = true }
+task2-mcp-gateway = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["common/tests", "scripts/tests", "task1-mcp-server/tests"]
+testpaths = ["common/tests", "scripts/tests", "task1-mcp-server/tests", "task2-mcp-gateway/tests"]
 pythonpath = ["scripts"]
 markers = [
     "live: hits real external providers; skipped unless the relevant API key is set",
@@ -46,7 +47,7 @@ branch = true
 # Integration tests spawn real server processes; measure those too.
 patch = ["subprocess"]
 parallel = true
-source = ["quilr_common", "scripts", "task1_mcp_server"]
+source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]
@@ -65,17 +66,22 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "SIM", "RET", "PTH
 ignore = ["TRY003", "PLR0913"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["quilr_common", "task1_mcp_server", "check_bidi", "check_commits"]
+known-first-party = ["quilr_common", "task1_mcp_server", "task2_mcp_gateway", "check_bidi", "check_commits"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is the pytest idiom; magic values are fine in test expectations.
 # TRY301: tests raise inside try on purpose to exercise exception logging.
-"**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301"]
+# PLR0917: pytest injects fixtures positionally; parametrized tests need several.
+"**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301", "PLR0917"]
 
 [tool.mypy]
 strict = true
-files = ["common/src", "common/tests", "scripts", "task1-mcp-server/src", "task1-mcp-server/tests"]
-mypy_path = "common/src:task1-mcp-server/src:scripts"
+files = [
+    "common/src", "common/tests", "scripts",
+    "task1-mcp-server/src", "task1-mcp-server/tests",
+    "task2-mcp-gateway/src", "task2-mcp-gateway/tests",
+]
+mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:scripts"
 explicit_package_bases = true
 python_version = "3.12"
 plugins = ["pydantic.mypy"]

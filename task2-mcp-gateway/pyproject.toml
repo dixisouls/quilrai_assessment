@@ -1,0 +1,28 @@
+[project]
+name = "task2-mcp-gateway"
+version = "0.1.0"
+description = "Task 2: MCP security gateway, a reverse proxy with JWT auth and tool-level RBAC"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "quilr-common",
+    "starlette>=1.10,<2",       # ASGI app: small, no framework magic on the hot path
+    "uvicorn>=0.54,<1",         # ASGI server
+    "httpx>=0.28,<1",           # async client with streaming and explicit timeouts
+    "pyjwt[crypto]>=2.15,<3",   # JWT verification (RS256/ES256 via cryptography)
+    "pydantic>=2.14,<3",
+    "pydantic-settings>=2.16,<3",
+    "mcp>=2.3,<3",              # only for the mock downstream server and SDK-client tests
+]
+
+[project.scripts]
+task2-mcp-gateway = "task2_mcp_gateway.__main__:main"
+
+[tool.uv.sources]
+quilr-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task2_mcp_gateway"]
