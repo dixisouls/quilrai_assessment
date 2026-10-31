@@ -48,6 +48,14 @@ From review #2:
   `sys.stdout` *is* `sys.stderr`; the identity check is too literal. Task 1
   works around it by configuring logging before reserving stdout.
 
+## Cross-cutting: to decide once for every gateway
+
+From review #3:
+
+- The MCP gateway relays downstream error *bodies* verbatim (e.g. a non-JSON
+  5xx from a misconfigured server). Whether gateways should sanitise
+  downstream error bodies should be one shared rule, decided with the user.
+
 ## For Task 2: MCP security gateway
 
 From review #2:

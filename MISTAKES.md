@@ -269,3 +269,43 @@ notes are in `BACKLOG.md`.
   several `-H` flags reached curl as a single argument under zsh.
 - **Fix:** the demo is a bash script using arrays. The gateway's 415 was the
   correct answer to a request with no valid content type.
+
+## Independent review #3 (branch `task/2-mcp-gateway`)
+
+A fresh reviewer in an isolated worktree attacked the gateway and a real MCP
+server as live processes. **No authorization bypass was found.** It raised 6
+in-scope findings (3 MEDIUM, 3 LOW), all now fixed with regression tests, and
+1 out-of-scope note (in `BACKLOG.md`).
+
+### R3-1 — Three inputs crashed the gateway with a bare 500 (MEDIUM)
+- **What happened:** a JOSE header with a numeric `kid` or a `crit` entry
+  raised a PyJWT error I hadn't caught (unauthenticated, and no audit event).
+  100k levels of nesting made `json.loads` raise `RecursionError` before my
+  depth check ran. A lone surrogate parsed fine but crashed when re-encoded.
+  Every case was a plain-text 500 with no envelope or request id.
+- **Root cause:** I caught the specific exceptions I expected (`DecodeError`,
+  `ValueError`) instead of each library's documented base class, and my depth
+  check ran *after* the parser it was meant to protect.
+- **Fix:** catch `jwt.InvalidTokenError`; handle `RecursionError`; build the
+  canonical bytes inside the parser. The handler now has a catch-all that
+  returns the envelope, so even an unknown bug can't produce a bare 500.
+- **Prevention:** for each input boundary, ask "what does this library raise on
+  hostile input?" and check its exception hierarchy, not its happy path.
+
+### R3-2 — "Rejects NaN/Infinity" was only half true (LOW)
+- **What happened:** `1e400` isn't the literal `Infinity`, so it slipped past
+  `parse_constant`, became `inf`, and was forwarded as the non-JSON token
+  `Infinity`.
+- **Fix:** the forwarded bytes are produced with `allow_nan=False`; anything
+  not representable as strict JSON is rejected.
+
+### R3-3 — Smaller accuracy fixes (LOW)
+- Base64-wrapped `Mcp-Name` headers were compared raw, refusing correct SDK
+  clients. They are now decoded with the SDK's own helper.
+- "`X-Request-ID` on every response" was false for Starlette's own 404/405/500
+  responses, and HEAD was implicitly routed and forwarded. All of these now
+  get the envelope, HEAD/OPTIONS/PUT/PATCH are refused at the gateway, and
+  slash redirects are off.
+- The reviewer noted that a broad `pkill -f task2_mcp_gateway` (which I also
+  used during the live demo) could kill a user's own gateway. From now on I
+  stop processes by PID.

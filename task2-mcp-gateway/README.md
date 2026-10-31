@@ -16,7 +16,7 @@ agent ──HTTP──► gateway :8080 ── auth → parse → authorize ─�
 
 | Requirement (ASSESSMENT.md) | Where | Proven by |
 |---|---|---|
-| Read `Bearer <token>`, extract role (`admin` / `viewer`) | `auth.py`: signed-JWT verification, exact `role` claim | `test_auth.py` (41 tests) |
+| Read `Bearer <token>`, extract role (`admin` / `viewer`) | `auth.py`: signed-JWT verification, exact `role` claim | `test_auth.py` (45 tests) |
 | `tools/list` forwarded transparently | `policy.py` allows it for every role; `proxy.py` streams the response back | `test_proxy.py::test_tools_list_is_forwarded_transparently`, integration |
 | `tools/call` with `params.name` starting `admin_` requires `admin` | `policy.authorize` | `test_policy.py`, `test_proxy.py`, integration |
 | Otherwise return `-32001: Unauthorized Tool Call` **without calling downstream** | `proxy.py` answers directly | Recording fake downstream asserts zero requests; the integration test checks the real server's execution log |
@@ -87,10 +87,13 @@ difference between the two parsers is a bypass, so the gateway rejects:
   the last, other parsers keep the first;
 - **`NaN`/`Infinity`**;
 - **batches** (removed from MCP in 2025-06-18; a classic smuggling surface);
-- **non-string or non-integer ids**, and over-deep nesting.
+- **non-string or non-integer ids**, and over-deep nesting (including nesting
+  deep enough to make the parser itself recurse out);
+- anything that can't be re-encoded as strict JSON: lone surrogates
+  (`"\ud800"`) and numbers that overflow to infinity (`1e400`).
 
-Allowed messages are **re-serialised from the parsed object**, so downstream
-receives byte-for-byte what was checked.
+Allowed messages are **re-serialised from the parsed object** as strict JSON
+(`Message.canonical`), so downstream receives byte-for-byte what was checked.
 
 **The `admin_` check is normalisation-robust.** It runs on the NFKC-normalised,
 trimmed, case-folded name, so `ADMIN_x`, `" admin_x"` and full-width spellings
@@ -101,8 +104,10 @@ only deny a viewer; a false negative would be privilege escalation.
 method and tool name in `Mcp-Method` / `Mcp-Name` headers. If they disagree
 with the body, the gateway rejects the request (`-32600`), so a downstream
 that routed on headers can't be steered to a tool the gateway never
-authorized. (The SDK server also rejects mismatches; this is defence in
-depth.)
+authorized. `Mcp-Name` is decoded with the SDK's own helper (it may carry a
+`=?base64?…?=` wrapper), so both sides read it identically; a malformed
+wrapper never matches. (The SDK server also rejects mismatches; this is
+defence in depth.)
 
 **Headers cross only through allowlists.** Request headers forwarded:
 `accept`, `content-type`, `mcp-*`, `last-event-id`. Response headers
@@ -125,12 +130,15 @@ every response.
 | Unknown method; bad `params.name` | 200 | `-32601` / `-32602` |
 | Viewer calls `admin_*` | 200 | **`-32001` Unauthorized Tool Call** |
 | Downstream unreachable / timed out | 502 / 504 | `-32002`, no hostnames or error text |
+| Unknown path / HTTP method (incl. HEAD, OPTIONS) | 404 / 405 | `-32600` |
+| Any unexpected error in the gateway | 500 | `-32603`; the traceback only in the log |
 
 **Stack choice.** Starlette (a thin ASGI app; no framework logic on the hot
 path), uvicorn, httpx (async streaming with explicit connect/read/write
-timeouts) and PyJWT with `cryptography`. The gateway doesn't import the MCP
-SDK; it speaks JSON-RPC over HTTP itself. The SDK is used only for the mock
-downstream server and the interoperability test.
+timeouts) and PyJWT with `cryptography`. The gateway speaks JSON-RPC over HTTP
+itself. From the MCP SDK it uses only `decode_header_value`, so it decodes
+`Mcp-Name` exactly as the downstream server does. The rest of the SDK is used
+for the mock downstream server and the interoperability test.
 
 ## Security considerations
 
@@ -152,9 +160,9 @@ uv run pytest task2-mcp-gateway -q
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| `test_auth.py` | 41 | Token parsing, `alg:none`, algorithm confusion, wrong key, tampering, expiry, `nbf`, issuer/audience, exact role values, JWKS `kid` selection |
-| `test_policy.py` | 60 | The brief's rules; bypass attempts (case, whitespace, full-width, header mismatch, duplicate keys, batches); method allowlist |
-| `test_proxy.py` | 29 | The HTTP layer against a **recording fake downstream**: denied requests produce zero downstream calls; header stripping; re-serialised body; SSE streaming; 401/413/415; sanitised 502/504 |
+| `test_auth.py` | 45 | Token parsing, `alg:none`, algorithm confusion, wrong key, tampering, expiry, `nbf`, issuer/audience, exact role values, JWKS `kid` selection, hostile `kid`/`crit` headers |
+| `test_policy.py` | 67 | The brief's rules; bypass attempts (case, whitespace, full-width, header mismatch including base64-encoded headers, duplicate keys, batches); method allowlist; pathological nesting, surrogates, `1e400` |
+| `test_proxy.py` | 35 | The HTTP layer against a **recording fake downstream**: denied requests produce zero downstream calls; header stripping; re-serialised body; SSE streaming; 401/413/415; sanitised 502/504; enveloped 404/405/500 |
 | `test_devtokens.py` | 3 | Key file permissions (0600); minted tokens verify |
 | `test_integration.py` | 5 | **Real processes on real sockets**: gateway in front of the SDK-based MCP server; denials never executed (checked in the downstream log); the official SDK client works through the gateway |
 
