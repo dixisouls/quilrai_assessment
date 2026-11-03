@@ -21,20 +21,27 @@ client ──OpenAI-style request──► gateway ──Anthropic SDK (stream)�
 
 ## Run it
 
+From the repo root, with `.env` filled in (copy `.env.example`; Task 3 needs
+`ANTHROPIC_API_KEY` and `LLM_GATEWAY_API_KEYS`):
+
 ```bash
 uv sync
-export ANTHROPIC_API_KEY=...                         # read by the Anthropic SDK
-export CLIENT_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-LLM_GATEWAY_API_KEYS="[\"$CLIENT_KEY\"]" uv run python -m task3_pii_guardrail   # :8090
+uv run python -m task3_pii_guardrail      # :8090, configured by .env
 
 curl -N http://127.0.0.1:8090/v1/chat/completions \
-  -H "authorization: Bearer $CLIENT_KEY" -H 'content-type: application/json' \
+  -H "authorization: Bearer <one of LLM_GATEWAY_API_KEYS>" -H 'content-type: application/json' \
   -d '{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"Hi"}]}'
 ```
 
+The gateway reads `LLM_GATEWAY_*`, `ANTHROPIC_API_KEY` and `LOG_*` from `.env`
+(or the environment, which wins). It refuses to start if a required value is
+missing or invalid, or if an `LLM_GATEWAY_*` name is misspelled. The message
+names the variable and never prints its value.
+
 Any OpenAI SDK works by pointing `base_url` at `http://127.0.0.1:8090/v1`.
-Offline: `python -m task3_pii_guardrail.mock_provider --port 9090` plus
-`LLM_GATEWAY_ANTHROPIC_BASE_URL=http://127.0.0.1:9090`.
+Offline: run `python -m task3_pii_guardrail.mock_provider --port 9090` and set
+`LLM_GATEWAY_ANTHROPIC_BASE_URL=http://127.0.0.1:9090` in `.env` (the key can
+then be any non-empty value).
 
 ### A real session (mock provider; it echoes the prompt in 3-character deltas)
 
@@ -137,6 +144,18 @@ so flushing it would leak a fragment of PII.
   compatibility, but the gateway routes to its configured model
   (`LLM_GATEWAY_MODEL`). Clients can't pick arbitrary (expensive) models.
 
+- **Cleanup survives a client disconnect.** Starlette cancels a streaming
+  body through an anyio cancel scope, which cancels *every* await in cleanup
+  code again. A plain `await stream.close()` in a `finally` is then cut off
+  halfway, and the HTTP request to the provider is abandoned. Every close
+  (the provider's SDK stream, the gateway's wrappers, Task 4's router and
+  backup) goes through `close_shielded()`: an `anyio.move_on_after(5 s,
+  shield=True)` scope, so the close finishes and a stuck close can't hold the
+  task. The redaction audit event is emitted before any await, so a
+  disconnect can't skip it either. A test sends a real `http.disconnect`
+  mid-stream and checks that the provider stream is closed, the audit event
+  emitted and the rate-limit reservation settled.
+
 **Error shape.** The OpenAI error envelope plus `request_id`
 (`{"error":{"message","type","code","param","request_id"}}`), with
 `X-Request-ID` on every response. Validation errors name the offending
@@ -147,7 +166,7 @@ so flushing it would leak a fragment of PII.
 | Missing or wrong API key | 401 `authentication_error` |
 | Bad JSON / schema / unknown field (e.g. `temperature`) | 400 `invalid_request_error` + `param` |
 | Body over 1 MiB | 413 |
-| Provider rate-limited | 429 + `Retry-After` |
+| Provider rate-limited | 429 + `Retry-After` (the provider's value, rounded **up** to whole seconds, so clients never retry early) |
 | Provider down / rejected our request / timed out | 502 / 502 / 504 `provider_error` |
 | Provider fails mid-stream | SSE `{"error":…}` event, then `[DONE]` |
 
@@ -160,20 +179,22 @@ so flushing it would leak a fragment of PII.
   contain no PII (checked in the demo and the integration test).
 - Request bodies are capped, JSON is parsed strictly (no `NaN`), and unknown
   fields are rejected.
-- The Anthropic key is read by the SDK from `ANTHROPIC_API_KEY` and never
-  stored in settings or logs.
+- `ANTHROPIC_API_KEY` is a required secret setting (`SecretStr`), loaded at
+  startup and passed to the SDK explicitly. A missing key stops the gateway
+  at startup instead of failing on the first request. It never appears in
+  logs, error messages or `repr`.
 
 ## Tests
 
 ```bash
 uv run pytest task3-pii-guardrail -q
-RUN_LIVE_TESTS=1 ANTHROPIC_API_KEY=... uv run pytest task3-pii-guardrail -m live   # real API, costs money
+RUN_LIVE_TESTS=1 uv run pytest task3-pii-guardrail -m live   # real API key from .env; costs money
 ```
 
 | Suite | Tests | What it proves |
 |---|---|---|
 | `test_redactor.py` | 44 | Every pattern; false positives avoided; every split point; char-by-char; **any chunking equals whole text (Hypothesis)**; word-level latency; bounded memory; linear and hostile-input timing; discard; exact counts |
-| `test_api.py` | 36 | OpenAI chunk format; redaction across provider chunks **and content blocks**; error mapping and sanitising (incl. hostile `Retry-After`, deep nesting); mid-stream failure with discard; audit event carries request id and principal; auth incl. blank/NBSP tokens; validation with `param`; provider stream always closed |
+| `test_api.py` | 57 | OpenAI chunk format; redaction across provider chunks **and content blocks**; error mapping and sanitising (incl. hostile `Retry-After`, rounded up); deep nesting; mid-stream failure with discard; audit event carries request id and principal; auth incl. blank/NBSP tokens; validation with `param`; the rate-limiter hook (reserve, settle, refund, 503 when the limiter fails); **cleanup on a real mid-stream client disconnect** |
 | `test_redaction_e2e.py` | 8 (+1 live) | **Real processes and sockets through the real Anthropic SDK**: streaming and non-streaming redaction, audit count, no PII in logs, TTFT before a provider pause, 429/502 mapping, mid-stream failure, auth |
 
 The TTFT test lives in the e2e suite on purpose: httpx's in-process

@@ -1,9 +1,10 @@
 # quilr-common
 
-The shared base used by every service in this repo. Today it provides
-**structured JSON logging, sensitive-data redaction, request context and a
-tamper-evident audit trail**. The error envelopes and JSON-RPC models will be
-added here as the tasks need them.
+The shared base used by every service in this repo: **settings loading
+(environment + `.env`), structured JSON logging, sensitive-data redaction,
+request context and a tamper-evident audit trail**. Each service defines its
+own error envelope next to its protocol (JSON-RPC for the MCP services,
+OpenAI-style for the LLM gateway).
 
 ## Usage
 
@@ -48,7 +49,41 @@ Sample output (one line each, shown pretty-printed here):
  "service": {"name": "mcp-gateway", "version": "1.0.0", "env": "prod"}}
 ```
 
-## Configuration (`LOG_*` environment variables)
+## Settings: environment variables plus `.env` (`quilr_common.config`)
+
+Every entrypoint loads its settings the same way:
+
+```python
+from quilr_common.config import load_settings, service_info
+
+configure_logging(service_info("llm-gateway", "0.2.0"), load_settings(LoggingSettings))
+settings = load_settings(GatewaySettings)
+```
+
+| Source (highest priority first) | Notes |
+|---|---|
+| Real environment variables | How Docker, CI and orchestrators configure a process |
+| The `.env` file | `./.env` by default, read by the service itself (no `source`). `QUILR_ENV_FILE` names another file, which must exist; an empty value turns file loading off |
+| Defaults on the settings class | Secrets and values with no safe default have none, so they are required |
+
+- **One file for every service.** Each settings class reads only its own
+  prefix (`dotenv_filtering="match_prefix"`), and an unknown variable *with*
+  that prefix (`LLM_GATEWAY_PROT`) is rejected at startup.
+- **Errors say what to fix, never the value.** `ConfigError` is a
+  `SystemExit`: the process exits with status 1 and prints only
+  `configuration error: LLM_GATEWAY_API_KEYS.0: String should have at least
+  16 characters`. No traceback, and no value (it may be a secret).
+- **Only entrypoints read the file.** Settings classes don't name it, so code
+  and tests that build settings directly never see a developer's `.env`. The
+  repo's `conftest.py` also turns file loading off for every server the tests
+  start.
+
+Alternatives considered: `env_file=".env"` on each settings class (rejected:
+every test that builds settings would silently read the developer's file),
+and requiring `set -a; source .env` (what the repo did before: easy to forget,
+and it silently started services on defaults; see `MISTAKES.md` F1).
+
+## Logging configuration (`LOG_*`)
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -113,9 +148,10 @@ asymmetric keys (stronger non-repudiation, but key management is out of scope
 here; HMAC is the pragmatic step).
 
 **Where logs go.** Following the 12-factor approach, services write an event
-stream to stdout/stderr and the platform routes it. In Docker Compose a
-shipper collects container output into searchable storage. The audit chain
-file sits on a dedicated volume, readable only by its owning service.
+stream to stdout/stderr and the platform routes it. In a container
+deployment, a log shipper collects that output into searchable storage, and
+the audit chain file sits on a dedicated volume readable only by its owning
+service. (This repo doesn't include deployment files.)
 
 ## Redaction coverage
 
@@ -135,17 +171,67 @@ file sits on a dedicated volume, readable only by its owning service.
 uv run pytest common -q --cov=quilr_common --cov-branch
 ```
 
-125 tests, 99% branch coverage: unit tests, Hypothesis properties (generated
-emails never survive, redaction is idempotent), concurrency (8 threads writing
-one chain, 20 interleaved asyncio tasks), attacker-view tamper tests
-(full-rewrite forgery, algorithm downgrade, spliced records, wrong key), and a
-subprocess test proving stdout stays byte-empty.
+139 tests:
+- unit tests;
+- Hypothesis properties (generated emails never survive, redaction is
+  idempotent);
+- concurrency (8 threads writing one chain, 20 interleaved asyncio tasks);
+- attacker-view tamper tests (full-rewrite forgery, algorithm downgrade,
+  spliced records, wrong key);
+- a subprocess test proving stdout stays byte-empty;
+- 14 settings-loading tests: file vs environment precedence, the shared file,
+  typos, missing values, no echoed values.
 
 ## Known limitations
 
+The logging package went beyond the brief, which never asks for one. The
+items below came out of independent reviews #1 and #2 and are left as
+documented limits, not fixed.
+
+**Log redaction**
+- **Slow on long unbroken input.** The email and JWT patterns backtrack
+  quadratically on long runs with no match (100 KB took 7.8 s). Redaction
+  runs on the logging thread, not the request path, but a flood of such
+  lines backs up the queue: app logs are then dropped and counted. Task 3's
+  response-path redactor is linear; this one hasn't been rewritten the same
+  way.
+- **Key-name matching misses some spellings.** camelCase and prefixed names
+  (`accessToken`, `OPENAI_API_KEY`, `db_password`) aren't treated as
+  sensitive keys. Their *values* are still caught when they match a pattern.
+- **Pattern gaps.** A card number followed by its CVV, credentials in URL
+  userinfo, `Basic`/`Token` auth headers, AWS/GitHub/Slack/Google key
+  formats and `password=…` pairs aren't covered. "the bearer of bad news" is
+  a false positive.
+- **Only string length is bounded.** Container sizes and key lengths aren't.
+- **Tracebacks.** Redaction runs on stack traces, but no dedicated test puts
+  a secret in an exception's text.
+
+**Logging pipeline and audit chain**
+- **The listener's stream handler uses the stdlib `handleError`.** If writing
+  a record fails, the stdlib can print that record, unredacted, to stderr.
+- **Audit injection.** Any logger can inject a record into the audit chain by
+  setting an `audit` attribute.
+- **fsync failure.** If fsync fails after a write, the chain's in-memory state
+  no longer matches the file.
+- **Startup check.** The writer verifies only the last record on startup,
+  not the whole chain (`verify_chain` checks all of it).
+- **Shutdown.** Shutting down with a full queue can raise and leave logging
+  half torn down.
+- **Production key not enforced.** "Keyed audit chain required in
+  production" is documented but not enforced, and `emit_audit` without a
+  configured file sink only logs.
+- **Email principals.** Audit records redact email-shaped principals, which
+  hides who acted.
+- **Console format.** The console formatter (`LOG_FORMAT=console`, for local
+  development) doesn't escape newlines.
+- **`stdout_reserved`.** `configure_logging(stdout_reserved=True)` refuses to
+  start when `sys.stdout` *is* `sys.stderr`. Task 1 configures logging before
+  it reserves stdout, so it isn't affected.
+
+**Scope**
 - Pattern redaction is best effort. It catches structured identifiers, not
-  free-text PII such as names or addresses (that needs NER or ML classifiers,
-  which QuilrAI does with custom intents). Call sites must still avoid logging
+  free-text PII such as names or addresses (that needs NER or ML
+  classifiers). Call sites must still avoid logging
   raw prompts and tool arguments.
 - SSN detection is US-only. Card detection covers PANs, not CVVs or expiry
   dates on their own.

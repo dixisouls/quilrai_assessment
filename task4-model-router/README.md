@@ -20,24 +20,32 @@ client ─► auth ─► token rate limiter ─► failover router ──► An
 
 ## Run it
 
+From the repo root, with `.env` filled in (copy `.env.example`; the required
+values are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `LLM_GATEWAY_API_KEYS`):
+
 ```bash
 uv sync
-set -a && source .env && set +a          # ANTHROPIC_API_KEY, OPENAI_API_KEY
-export CLIENT_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-LLM_GATEWAY_API_KEYS="[\"$CLIENT_KEY\"]" uv run python -m task4_model_router     # :8090
+uv run python -m task4_model_router      # :8090, configured by .env
 ```
+
+The gateway reads `LLM_GATEWAY_*`, `LLM_ROUTER_*`, both provider keys and
+`LOG_*` from `.env` (or the environment, which wins). It refuses to start,
+naming the variable, if either provider key is missing: without the backup's
+key the first failover would fail. A misspelled `LLM_GATEWAY_*` or
+`LLM_ROUTER_*` name is refused the same way.
 
 Same endpoint and client as Task 3 (`POST /v1/chat/completions`,
 OpenAI-compatible). Every response says who served it and what budget is
 left: `x-gateway-provider`, `x-ratelimit-limit-tokens`,
 `x-ratelimit-remaining-tokens`.
 
-Offline: `python -m task3_pii_guardrail.mock_provider --port 9090` and
-`python -m task4_model_router.mock_openai --port 9092`, with
+Offline: run `python -m task3_pii_guardrail.mock_provider --port 9090` and
+`python -m task4_model_router.mock_openai --port 9092`, and set
 `LLM_GATEWAY_ANTHROPIC_BASE_URL=http://127.0.0.1:9090` and
-`LLM_ROUTER_OPENAI_BASE_URL=http://127.0.0.1:9092/v1`. In a prompt,
-`[[status:429]]`, `[[hang:6]]`, `[[status:529]]` and `[[openai:429]]` script
-the primary's and backup's behaviour. All settings are in `.env.example`.
+`LLM_ROUTER_OPENAI_BASE_URL=http://127.0.0.1:9092/v1` in `.env` (the provider
+keys can then be any non-empty value). In a prompt, `[[status:429]]`,
+`[[hang:6]]`, `[[status:529]]` and `[[openai:429]]` script the primary's and
+backup's behaviour.
 
 ### A real session (offline mocks; scripted by the markers above)
 
@@ -55,7 +63,8 @@ internals.
 
 ### Live, with your keys
 
-Run with `RUN_LIVE_TESTS=1`; it costs a fraction of a cent:
+Run with `RUN_LIVE_TESTS=1`; the keys are read from `.env`, and it costs a
+fraction of a cent:
 
 | Test | Result |
 |---|---|
@@ -122,6 +131,12 @@ Run with `RUN_LIVE_TESTS=1`; it costs a fraction of a cent:
   the backup.
 - **The boundary is exact:** a primary that answers at 2.9 s is kept even if
   its text is slow afterwards. One that hasn't answered by 3.0 s is dropped.
+- **Closing the losing or finished stream can't be cut off.** On a client
+  disconnect, Starlette's anyio cancellation cancels every await in cleanup
+  again. The router's and the OpenAI provider's closes run in
+  `close_shielded()` (Task 3), so the HTTP stream to the provider is closed,
+  not abandoned. A test closes the router inside a cancelled scope and checks
+  that the provider's close completes.
 - **The backup has its own deadline** (`LLM_ROUTER_BACKUP_TIMEOUT_S`), so a
   double failure ends in a bounded time with the standard error.
 - `FailoverProvider` is itself a `Provider`. Task 3's gateway, redaction and
@@ -145,15 +160,16 @@ Everything goes through Task 3's single OpenAI-shaped envelope plus
 
 ```bash
 uv run pytest task4-model-router -q
-RUN_LIVE_TESTS=1 uv run pytest task4-model-router -m live      # real keys from .env, ~5 tiny calls
+RUN_LIVE_TESTS=1 uv run pytest task4-model-router -m live      # keys read from .env, ~5 tiny calls
 ```
 
 | Suite | Tests | What it proves |
 |---|---|---|
 | `test_ratelimit.py` | 18 | Sliding (not fixed) window; exact `Retry-After`; settle up and down, refund; tenant isolation; eviction incl. idle tenants; on-disk persistence across restart; **no over-admission under concurrency: one connection, two connections, and 4 real processes**; hostile tenant ids are just data |
-| `test_router.py` | 12 | Healthy primary; 429 failover with audit; **timeout failover at the deadline with the primary cancelled**; answering just before the deadline is kept; no failover on other errors or mid-stream; both fail; backup timeout; early close; 20 concurrent mixed requests |
+| `test_router.py` | 13 | Healthy primary; 429 failover with audit; **timeout failover at the deadline with the primary cancelled**; answering just before the deadline is kept; no failover on other errors or mid-stream; both fail; backup timeout; early close; close completes inside a cancelled scope; 20 concurrent mixed requests |
 | `test_openai_provider.py` | 5 | The real OpenAI SDK against the mock: event order, gateway-chosen model, `max_completion_tokens`, usage reporting, error mapping |
 | `test_router_e2e.py` | 8 (+2 live) | **Three real processes over real sockets**: all of the above end to end, including redaction on the backup path and the SQLite file |
+| `e2e/` (repo root) | | The gateway with every setting from a `.env` file (a non-default budget proves it was read); PII from an MCP tool redacted on both provider paths; the standard 429; startup refusal when a provider key is missing |
 
 ## Known limitations
 
