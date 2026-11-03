@@ -13,7 +13,6 @@ branch ─► small commits (hooks) ─► push (CI) ─► independent review �
 | Task N | `task/N-<slug>` (e.g. `task/1-mcp-server`) |
 | Shared library | `feat/common-<slug>` |
 | Tooling / CI | `chore/<slug>` |
-| Docker / deploy | `build/<slug>` |
 | Fix on main | `fix/<slug>` |
 
 `main` is protected. Direct pushes are blocked on GitHub and refused locally by
@@ -44,8 +43,10 @@ and again in CI. AI-tool attribution trailers are rejected.
 | Dependabot | — | weekly | Stale action SHAs and dependencies |
 | `detect-private-key`, large files, merge markers | pre-commit | — | Accidental commits |
 
-Planned with the Docker step: `hadolint` (Dockerfile lint), `trivy` (image CVEs
-and misconfig), image build, and an SBOM.
+Docker packaging is out of scope for this assessment (decided with the user),
+so image checks (`hadolint`, `trivy`, an SBOM) aren't among the gates. The
+`pytest` gate includes the root `e2e/` suite, which starts every service as a
+real process configured only by a `.env` file.
 
 CI hardening: actions pinned to commit SHAs, a read-only default
 `GITHUB_TOKEN`, `persist-credentials: false`, downloaded binaries verified by

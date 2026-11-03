@@ -85,9 +85,10 @@ Format: **what happened → root cause → fix → prevention.**
 A fresh reviewer agent with no shared context reviewed the foundations and CI.
 It raised 18 findings (3 HIGH, 7 MEDIUM, 8 LOW), each with a reproduction. The
 tooling findings are fixed on `chore/ci-setup`. The 13 shared-library
-findings are **not fixed yet**: they are deferred and assigned in
-`BACKLOG.md`. (A fix branch was started out of order, without the user's
-go-ahead, and then discarded; see R3.)
+findings were deferred and tracked in a backlog file. The ones still open are
+now listed under Known limitations in `common/README.md`, and the backlog file
+was removed on the final branch. (A fix branch was started out of order,
+without the user's go-ahead, and then discarded; see R3.)
 
 ### R1 — Commit checker treated history `#` lines as comments and ignored `git commit -v`
 - **What happened:** in `--range` mode, a header such as `#42 fix …` was
@@ -118,8 +119,9 @@ go-ahead, and then discarded; see R3.)
   next.
 - **Root cause:** I ordered work by the severity of the findings rather than by
   the agreed plan, and didn't ask first.
-- **Fix:** the branch was discarded unmerged. The findings are recorded in
-  `BACKLOG.md` and assigned to the task where they belong.
+- **Fix:** the branch was discarded unmerged. The findings were recorded in a
+  backlog file and assigned to the task where they belong. They now live
+  under Known limitations in `common/README.md`.
 - **Prevention:** finish the agreed step, report, and ask before starting
   anything outside it.
 
@@ -182,7 +184,8 @@ go-ahead, and then discarded; see R3.)
 A fresh reviewer in an isolated worktree, scoped to Task 1, raised 8 in-scope
 findings (1 HIGH, 3 MEDIUM, 4 LOW) and 2 out-of-scope notes, all with
 reproductions. All 8 are fixed or explicitly documented. The out-of-scope
-notes are in `BACKLOG.md`.
+notes are now Known limitations in `task1-mcp-server/README.md` and
+`common/README.md`.
 
 ### R2-1 — Committed refunds lost their replies when stdin closed (HIGH)
 - **What happened:** if a client wrote its requests and closed stdin at once,
@@ -275,7 +278,8 @@ notes are in `BACKLOG.md`.
 A fresh reviewer in an isolated worktree attacked the gateway and a real MCP
 server as live processes. **No authorization bypass was found.** It raised 6
 in-scope findings (3 MEDIUM, 3 LOW), all now fixed with regression tests, and
-1 out-of-scope note (in `BACKLOG.md`).
+1 out-of-scope note (downstream error bodies relayed verbatim). That note was
+fixed on the final branch (F2).
 
 ### R3-1 — Three inputs crashed the gateway with a bare 500 (MEDIUM)
 - **What happened:** a JOSE header with a numeric `kid` or a `crit` entry
@@ -459,7 +463,8 @@ accounting or failover bypass**:
 - window boundaries were exact.
 
 It raised 5 in-scope findings (2 HIGH, 2 MEDIUM, 1 LOW), all fixed with
-regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
+regression tests. Two out-of-scope Task 3 notes were deferred and fixed on the
+final branch (F3).
 
 ### R5-1 — Settlement could be lost on client disconnect (HIGH)
 - **What happened:** my `finally: await acct.settle()` carried the comment
@@ -498,3 +503,69 @@ regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
   backoff. It now passes 10/10 runs.
 - **Prevention:** "concurrent" tests must use the real concurrency unit
   (processes, here), not a stand-in.
+
+## Final integration branch (`chore/final-integration`)
+
+### F1 — Nothing read `.env`; I first defended it instead of seeing the gap
+- **What happened:** `.env.example` documented every setting, but no service
+  loaded `.env`. Settings came only from the process environment, and the
+  READMEs said to run `set -a && source .env` first. The user asked how it
+  could work with only two keys in `.env`. I explained the defaults and
+  called that standard practice, instead of seeing the real problem: a
+  service started without sourcing would silently ignore the file.
+- **Root cause:** I treated "pydantic-settings reads environment variables"
+  as if it meant "the service reads `.env`". I never started a service from
+  a clean shell with only the file to configure it.
+- **Fix:** `quilr_common.config.load_settings()` loads `.env` in every
+  entrypoint. One shared file works for every service, and each one rejects
+  misspelled names with its own prefix. Provider keys are now required
+  settings, and errors name the variable without echoing its value. The new
+  `e2e/` suite starts every service with *only* a `.env` file as
+  configuration, and a test checks that a non-default budget from the file
+  takes effect.
+- **Prevention:** a documented configuration path counts as working only
+  once a test exercises it end to end, from a clean environment.
+
+### F1a — Design trap avoided: `env_file` on the settings classes
+- Setting `env_file=".env"` in each `model_config` was the obvious one-line
+  fix. But every test that builds a settings object directly would then
+  silently read the developer's `.env`, so test results would depend on the
+  machine. I also checked the installed pydantic-settings: with
+  `extra="forbid"`, a shared file fails on every other service's variables,
+  unless `dotenv_filtering="match_prefix"` is set. Only entrypoints read the
+  file now, and the root `conftest.py` turns it off for spawned test servers.
+
+### F2 — The MCP gateway relayed downstream error bodies (review #3 note)
+- **What happened:** any downstream HTTP error streamed back unchanged:
+  stack traces, HTML pages from a proxy, and the MCP SDK's own 400s, which
+  contain raw pydantic output echoing the rejected input.
+- **Fix:** a downstream 4xx is relayed only if it is a well-formed JSON-RPC
+  error. Its status and code are kept (clients act on 404 and 405), and the
+  message is replaced with the gateway's standard text. Everything else
+  becomes `502` / `-32002`. Tests cover a traceback, an HTML page, real SDK
+  validation text, oversize bodies and malformed bodies.
+
+### F3 — Cleanup could be cut off on client disconnect (review #5 notes)
+- **What happened:** the reviewer flagged that the gateway's
+  `finally: await events.aclose()` could be re-cancelled. Before fixing, I
+  measured instead of assuming. Plain asyncio cancellation lets a two-step
+  close finish; anyio cancellation (what Starlette uses on disconnect) cuts
+  it off. Starlette 1.10 cancels while the body waits for the provider, so
+  the cleanup that actually gets cut off runs inside the **providers'**
+  `finally` blocks, not only the gateway's.
+- **Fix:** `close_shielded()` (`anyio.move_on_after(5 s, shield=True)`) at
+  every close point: both providers, the router and the gateway. The
+  redaction audit event now runs before any await. `Retry-After` is rounded
+  up instead of truncated. A test sends a real ASGI `http.disconnect`
+  mid-stream and checks the provider close, the audit event and the
+  settlement.
+- **Prevention:** before fixing a reported race, reproduce which path is
+  actually hit; the fix belongs where the cancellation lands.
+
+### F4 — Smaller slips
+- **Commit title.** A commit title was 73 characters; the commit-msg hook
+  refused it.
+- **mypy.** mypy refused a second module named `conftest`, so the root
+  `conftest.py` is left out of mypy's file list.
+- **Stale README count.** The Task 3 README still said 36 API tests after
+  Task 4, review #5 and this branch had brought the count to 57. READMEs now take test counts from the source.
