@@ -9,6 +9,7 @@ members = [
     "task1-mcp-server",
     "task2-mcp-gateway",
     "task3-pii-guardrail",
+    "task4-model-router",
 ]
 
 [[package]]
@@ -727,6 +728,23 @@ wheels = [
 ]
 
 [[package]]
+name = "openai"
+version = "3.44.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/82/f179e77c5d1893ab58dae694ac45784510b7c9465375735be361fcd7a065/openai-3.44.0.tar.gz", hash = "sha256:32e5981c3790ba0bc321f9a72ae88ee540166cc8696c774440932e51c309e0e5", size = 2384276, upload-time = "2026-11-03T20:28:13.685Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/b5/45dea1c284d11de6c291763d826c03ff4d0713094feedd1a06d6abbe167f/openai-3.44.0-py3-none-any.whl", hash = "sha256:0eebe25581773461fe7ad0e5fa53713b5e9f59c40fccbc9246cf82fff72bffd9", size = 2422175, upload-time = "2026-11-03T20:28:11.445Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.45.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1077,6 +1095,7 @@ dependencies = [
     { name = "task1-mcp-server" },
     { name = "task2-mcp-gateway" },
     { name = "task3-pii-guardrail" },
+    { name = "task4-model-router" },
 ]
 
 [package.dev-dependencies]
@@ -1097,6 +1116,7 @@ requires-dist = [
     { name = "task1-mcp-server", editable = "task1-mcp-server" },
     { name = "task2-mcp-gateway", editable = "task2-mcp-gateway" },
     { name = "task3-pii-guardrail", editable = "task3-pii-guardrail" },
+    { name = "task4-model-router", editable = "task4-model-router" },
 ]
 
 [package.metadata.requires-dev]
@@ -1336,6 +1356,31 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.16,<3" },
     { name = "quilr-common", editable = "common" },
     { name = "starlette", specifier = ">=1.10,<2" },
+    { name = "uvicorn", specifier = ">=0.54,<1" },
+]
+
+[[package]]
+name = "task4-model-router"
+version = "0.1.0"
+source = { editable = "task4-model-router" }
+dependencies = [
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "quilr-common" },
+    { name = "starlette" },
+    { name = "task3-pii-guardrail" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai", specifier = ">=3.44,<4" },
+    { name = "pydantic", specifier = ">=2.14,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16,<3" },
+    { name = "quilr-common", editable = "common" },
+    { name = "starlette", specifier = ">=1.10,<2" },
+    { name = "task3-pii-guardrail", editable = "task3-pii-guardrail" },
     { name = "uvicorn", specifier = ">=0.54,<1" },
 ]
 
