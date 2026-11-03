@@ -568,4 +568,11 @@ final branch (F3).
 - **mypy.** mypy refused a second module named `conftest`, so the root
   `conftest.py` is left out of mypy's file list.
 - **Stale README count.** The Task 3 README still said 36 API tests after
-  Task 4, review #5 and this branch had brought the count to 57. READMEs now take test counts from the source.
+  Task 4, review #5 and this branch had brought the count to 57. READMEs now
+  take test counts from the source.
+- **Wrong commit.** A file deleted with `git rm` was already staged, and a
+  later `git add` naming it failed. The deletion went into the next commit
+  (`.env.example`). Nothing had been pushed, so the docs commits were rebuilt
+  with a soft reset, one group per commit. An extra trailing newline in this
+  file was then caught by the end-of-file hook. Prevention: check
+  `git status` right before each commit, not only before the first.
