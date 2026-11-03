@@ -28,4 +28,6 @@ class RouterSettings(BaseSettings):
     # Backup provider (OpenAI).
     openai_model: str = "gpt-6.1-sol"
     openai_base_url: str | None = None  # e.g. the mock in tests and demos
-    backup_max_retries: int = Field(default=1, ge=0, le=5)
+    # 0: a backup 429 goes straight to the client with its Retry-After. An SDK
+    # retry would sleep inside the backup deadline and turn it into a 504.
+    backup_max_retries: int = Field(default=0, ge=0, le=5)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -148,10 +150,10 @@ async def test_concurrent_reservations_never_exceed_the_limit(limiter: TokenRate
     assert sum(r.allowed for r in results) == 25  # exactly 1000 / 40, no over-admission
 
 
-async def test_two_processes_sharing_the_file_never_over_admit(
+async def test_two_connections_sharing_the_file_never_over_admit(
     tmp_path: Path, clock: Clock
 ) -> None:
-    # Two limiter instances = two connections, like two gateway workers.
+    # Two limiter instances = two SQLite connections in one process.
     path = tmp_path / "shared.sqlite3"
     a = TokenRateLimiter(path, limit=1000, window_s=60, clock=clock)
     b = TokenRateLimiter(path, limit=1000, window_s=60, clock=clock)
@@ -172,3 +174,28 @@ def test_invalid_configuration_is_refused(tmp_path: Path) -> None:
         TokenRateLimiter(tmp_path / "x.db", limit=0, window_s=60)
     with pytest.raises(ValueError, match="window"):
         TokenRateLimiter(tmp_path / "x.db", limit=10, window_s=0)
+
+
+@pytest.mark.integration
+def test_separate_processes_sharing_the_file_never_over_admit(tmp_path: Path) -> None:
+    # Real gateway workers are separate processes: BEGIN IMMEDIATE must hold across them.
+    script = (
+        "import asyncio, sys\n"
+        "from pathlib import Path\n"
+        "from task4_model_router.ratelimit import TokenRateLimiter\n"
+        "async def main():\n"
+        "    lim = TokenRateLimiter(Path(sys.argv[1]), limit=1000, window_s=60)\n"
+        "    results = await asyncio.gather(*(lim.reserve('t', 40) for _ in range(25)))\n"
+        "    lim.close()\n"
+        "    print(sum(r.allowed for r in results))\n"
+        "asyncio.run(main())\n"
+    )
+    db = tmp_path / "shared.sqlite3"
+    procs = [
+        subprocess.Popen(  # noqa: S603 - fixed argv
+            [sys.executable, "-c", script, str(db)], stdout=subprocess.PIPE, text=True
+        )
+        for _ in range(4)
+    ]
+    admitted = sum(int(p.communicate(timeout=60)[0].strip()) for p in procs)
+    assert admitted == 25  # 4 processes x 25 requests x 40 tokens against 1000: exactly 25

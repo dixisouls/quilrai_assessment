@@ -81,10 +81,33 @@ class TokenRateLimiter:
         path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None: transactions are explicit (BEGIN IMMEDIATE below).
         self._db = sqlite3.connect(path, isolation_level=None, check_same_thread=False, timeout=10)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA busy_timeout=10000")
+        self._enable_wal()
+        self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+
+    def _enable_wal(self, deadline_s: float = 10.0) -> None:
+        """Switch to WAL, tolerating other workers starting at the same moment.
+
+        Changing the journal mode needs an exclusive lock and fails immediately
+        (busy_timeout doesn't apply) while another connection holds a lock, which
+        is exactly what happens when several gateway workers start together.
+        Already-WAL databases need no switch; otherwise retry with backoff.
+        """
+        stop = time.monotonic() + deadline_s
+        delay = 0.01
+        while True:
+            try:
+                (mode,) = self._db.execute("PRAGMA journal_mode").fetchone()
+                if str(mode).lower() != "wal":
+                    self._db.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or time.monotonic() > stop:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+            else:
+                return
 
     @property
     def limit(self) -> int:
