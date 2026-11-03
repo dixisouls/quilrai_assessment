@@ -55,6 +55,7 @@ branch = true
 # Integration tests spawn real server processes; measure those too.
 patch = ["subprocess"]
 parallel = true
+sigterm = true  # servers in e2e tests are stopped with SIGTERM; save their data too
 source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail", "task4_model_router"]
 omit = ["*/tests/*"]
 
