@@ -358,6 +358,146 @@ async def test_downstream_failures_are_sanitised(
     assert "downstream.internal" not in resp.text
 
 
+# --- Downstream error responses are never relayed verbatim ------------------------------
+
+_JSON = "application/json"
+
+
+def _rpc_error(code: object, message: str = "x") -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    ("status", "content", "content_type"),
+    [
+        (
+            500,
+            b'Traceback (most recent call last):\n  File "/srv/mcp/app.py", line 9\n'
+            b"KeyError: 'secret' (db.internal:5432)",
+            "text/plain",
+        ),
+        (502, b"<html>nginx/1.25: upstream 10.0.0.7:9000 failed</html>", "text/html"),
+        # A 5xx is replaced even when it is well-formed JSON-RPC: its text is internal.
+        (500, _rpc_error(-32603, "KeyError: 'secret' at /srv/mcp/app.py"), _JSON),
+        # A 4xx that isn't JSON-RPC means downstream is misconfigured, not the client.
+        (404, b"<html>Not Found: /srv/mcp/routes.py</html>", "text/html"),
+        (400, b"x" * (64 * 1024 + 1), _JSON),  # oversize: never buffered, never relayed
+    ],
+)
+async def test_downstream_error_bodies_are_never_relayed(
+    client: httpx.AsyncClient,
+    downstream: RecordingDownstream,
+    mint: Minter,
+    status: int,
+    content: bytes,
+    content_type: str,
+) -> None:
+    downstream.behaviour = lambda _r: httpx.Response(
+        status,
+        headers={"content-type": content_type, "server": "internal-mcp/1.0"},
+        content=content,
+    )
+    resp = await client.post("/mcp", json=_rpc("tools/list", 5), headers=_auth(mint))
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["id"] == 5
+    assert body["error"]["code"] == -32002
+    assert body["error"]["message"] == "Downstream error"
+    assert body["error"]["data"] == {"request_id": resp.headers["x-request-id"]}
+    assert "server" not in resp.headers
+    for leak in ("Traceback", "/srv", "nginx", "10.0.0.7", "db.internal", "KeyError", "secret"):
+        assert leak not in resp.text
+
+
+async def test_downstream_protocol_errors_keep_status_and_code_but_not_text(
+    client: httpx.AsyncClient, downstream: RecordingDownstream, mint: Minter
+) -> None:
+    # What the MCP SDK really sends for a body it can't validate: pydantic's raw
+    # output, including the input value and the library's URL.
+    sdk_text = (
+        "Validation error: 1 validation error for JSONRPCRequest\nparams\n  Input should be a "
+        "valid dictionary [type=dict_type, input_value='4111111111111111', input_type=str]\n"
+        "    For further information visit https://errors.pydantic.dev/2.14/v/dict_type"
+    )
+    downstream.behaviour = lambda _r: httpx.Response(
+        400,
+        headers={"content-type": _JSON, "mcp-session-id": "sess-1"},
+        content=_rpc_error(-32602, sdk_text),
+    )
+    resp = await client.post("/mcp", json=_rpc("tools/list", 5), headers=_auth(mint))
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["id"] == 5
+    assert body["error"] == {
+        "code": -32602,
+        "message": "Invalid params",
+        "data": {"request_id": resp.headers["x-request-id"]},
+    }
+    assert resp.headers["mcp-session-id"] == "sess-1"
+    assert "4111" not in resp.text
+    assert "pydantic" not in resp.text
+
+
+@pytest.mark.parametrize(
+    ("method", "status", "code", "message"),
+    [
+        # Unknown or expired session: the 404 tells MCP clients to start a new session.
+        ("POST", 404, -32600, "Invalid Request"),
+        # No server-to-client stream: the 405 tells MCP clients to skip it.
+        ("GET", 405, -32000, "Request rejected by the downstream server"),
+        # Application codes keep the code, with generic text.
+        ("POST", 409, -32010, "Request rejected by the downstream server"),
+    ],
+)
+async def test_downstream_transport_statuses_that_clients_act_on_are_kept(
+    client: httpx.AsyncClient,
+    downstream: RecordingDownstream,
+    mint: Minter,
+    method: str,
+    status: int,
+    code: int,
+    message: str,
+) -> None:
+    downstream.behaviour = lambda _r: httpx.Response(
+        status,
+        headers={"content-type": _JSON},
+        content=_rpc_error(code, "session 7f3a on worker mcp-02 not found"),
+    )
+    kwargs: dict[str, Any] = {"headers": {**_auth(mint), "mcp-session-id": "s"}}
+    if method == "POST":
+        kwargs["json"] = _rpc("tools/list", 6)
+    resp = await client.request(method, "/mcp", **kwargs)
+    assert resp.status_code == status
+    assert resp.json()["error"]["code"] == code
+    assert resp.json()["error"]["message"] == message
+    assert "worker" not in resp.text
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _rpc_error(True),  # bool is not a JSON-RPC code
+        _rpc_error("-32600"),  # nor is a string
+        b'{"jsonrpc": "1.0", "error": {"code": -32600, "message": "x"}}',
+        b'{"jsonrpc": "2.0", "result": {}}',
+        b"[1, 2]",
+        b"\xff\xfe not utf-8",
+        b"",
+    ],
+)
+async def test_malformed_downstream_4xx_bodies_become_502(
+    client: httpx.AsyncClient, downstream: RecordingDownstream, mint: Minter, content: bytes
+) -> None:
+    downstream.behaviour = lambda _r: httpx.Response(
+        400, headers={"content-type": _JSON}, content=content
+    )
+    resp = await client.post("/mcp", json=_rpc("tools/list", 8), headers=_auth(mint))
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == -32002
+
+
 # --- Correlation ----------------------------------------------------------------------------------
 
 

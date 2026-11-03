@@ -15,6 +15,8 @@ caller can't make the gateway buffer or parse anything:
 5. Forward the *re-serialised* message to the configured downstream URL and
    stream its response back (JSON or SSE). Failures become sanitised 502/504
    responses carrying ``-32002``.
+6. A downstream *error* response (HTTP 4xx/5xx) is never relayed verbatim; see
+   :func:`_sanitise_downstream_error`.
 
 Headers cross the gateway only from an explicit allowlist in each direction.
 The client's ``Authorization`` never reaches downstream, and downstream's
@@ -24,6 +26,7 @@ internal headers (``Set-Cookie``, ``Server``, …) never reach the client.
 from __future__ import annotations
 
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, Final
@@ -49,7 +52,10 @@ from task2_mcp_gateway.auth import AuthError, Principal, TokenVerifier
 from task2_mcp_gateway.config import GatewaySettings
 from task2_mcp_gateway.jsonrpc import (
     INTERNAL_ERROR,
+    INVALID_PARAMS,
     INVALID_REQUEST,
+    METHOD_NOT_FOUND,
+    PARSE_ERROR,
     JsonRpcError,
     JsonRpcId,
     Message,
@@ -82,6 +88,17 @@ _FORWARD_REQUEST_PREFIX: Final = "mcp-param-"
 _RETURN_RESPONSE: Final = frozenset(
     {"content-type", "cache-control", "mcp-session-id", "mcp-protocol-version", "retry-after"}
 )
+# Downstream error bodies are read only up to this size; anything larger isn't relayed.
+_MAX_DOWNSTREAM_ERROR_BYTES: Final = 64 * 1024
+# Messages the gateway sends for relayed downstream errors. Downstream's own text
+# is never forwarded: the MCP SDK puts raw validation output (input values,
+# library names) in it, and a misconfigured server may return anything.
+_STANDARD_MESSAGES: Final = {
+    PARSE_ERROR: "Parse error",
+    INVALID_REQUEST: "Invalid Request",
+    METHOD_NOT_FOUND: "Method not found",
+    INVALID_PARAMS: "Invalid params",
+}
 _AUTH_DESCRIPTIONS: Final = {
     "expired": "token expired",
     "malformed": "malformed token",
@@ -269,6 +286,8 @@ class _Gateway:
                 502, DOWNSTREAM_UNAVAILABLE, "Downstream unavailable", request_id, rpc_id=rpc_id
             )
 
+        if response.is_error:  # 4xx or 5xx
+            return await _sanitise_downstream_error(response, rpc_id, request_id)
         out = {k: v for k, v in response.headers.items() if k.lower() in _RETURN_RESPONSE}
         out["x-request-id"] = request_id
         return StreamingResponse(
@@ -277,6 +296,80 @@ class _Gateway:
             headers=out,
             background=BackgroundTask(response.aclose),
         )
+
+
+async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
+    """The response body, or None if it is larger than ``limit`` bytes."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _jsonrpc_error_code(body: bytes | None) -> int | None:
+    """The ``error.code`` of a well-formed JSON-RPC 2.0 error response, else None."""
+    if body is None:
+        return None
+    try:
+        obj = json.loads(body)
+    except ValueError:  # includes UnicodeDecodeError and JSONDecodeError
+        return None
+    if not isinstance(obj, dict) or obj.get("jsonrpc") != "2.0":
+        return None
+    error = obj.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if type(code) is int else None  # bool is an int subclass; exclude it
+
+
+async def _sanitise_downstream_error(
+    response: httpx.Response, rpc_id: JsonRpcId | None, request_id: str
+) -> Response:
+    """Turn a downstream HTTP error into the gateway's own envelope.
+
+    * **4xx with a JSON-RPC error body** (the MCP SDK's transport errors, such
+      as an unknown session or a bad ``Accept`` header): the status and the
+      JSON-RPC code are kept, because MCP clients act on them. For example, a
+      404 tells a client to start a new session. The message is the gateway's
+      standard text for that code, never downstream's.
+    * **Anything else** (5xx, a non-JSON body, an HTML error page from a
+      misconfigured server, or a body over 64 KiB): ``502`` with ``-32002``.
+      The cause is downstream, not the client, and its text may expose
+      internals such as stack traces, hostnames or library names.
+
+    Downstream's status and body size go to the log (never the body itself), so
+    support can find the cause by ``request_id``.
+    """
+    status = response.status_code
+    try:
+        body = await _read_capped(response, _MAX_DOWNSTREAM_ERROR_BYTES)
+    except httpx.HTTPError:
+        body = None
+    finally:
+        await response.aclose()
+    code = None if response.is_server_error else _jsonrpc_error_code(body)
+    log.warning(
+        "downstream returned an error",
+        extra={
+            "status": status,
+            "body_bytes": None if body is None else len(body),
+            "relayed_code": code,
+        },
+    )
+    if code is None:
+        return _error(502, DOWNSTREAM_UNAVAILABLE, "Downstream error", request_id, rpc_id=rpc_id)
+    headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower() in _RETURN_RESPONSE and k.lower() != "content-type"
+    }
+    message = _STANDARD_MESSAGES.get(code, "Request rejected by the downstream server")
+    return _error(status, code, message, request_id, rpc_id=rpc_id, headers=headers)
 
 
 async def _healthz(_request: Request) -> JSONResponse:
