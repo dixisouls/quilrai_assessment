@@ -3,38 +3,19 @@
 This file governs all work in this repo. Read it fully before touching code.
 The assessment brief is `ASSESSMENT.md`. Mistakes are logged in `MISTAKES.md`.
 
----
+Every component must be **secure by default, fail closed, auditable, low
+latency, and honest about its limits.**
 
-## 1. Context: who we are building for
-
-**QuilrAI** (quilr.ai) is an AI security & compliance company (Austin / Pune, founded 2024).
-Their product is exactly what this assessment asks us to build in miniature:
-
-- **LLM Gateway** — OpenAI-compatible, one `base_url` change. Pipeline:
-  Identity/Auth → Rate limits & token budgets → Security guardrails (PII/PHI/PCI,
-  prompt injection) → Custom intents → Prompt store → Token saving → Routing/failover.
-  Controls apply on **both** request and response paths.
-- **MCP Gateway** — transparent proxy between agents and MCP servers. Per-tool
-  permissions, least privilege, tool risk tiers (read / write / destructive —
-  destructive disabled by default), auth mediation (agents never see raw creds),
-  scans tool outputs for injection, logs every tool invocation.
-- **Claims they sell on:** < 50 ms enforcement overhead, immutable audit logs,
-  SOC 2 Type II, HIPAA, PCI-DSS, NIST AI RMF alignment.
-
-**Implication:** reviewers are security engineers. They will judge us on the
-things their product promises. Every component must be **secure by default,
-fail closed, auditable, low latency, and honest about its limits.**
-
-| Task | Maps to QuilrAI product surface |
+| Task | What it is |
 |---|---|
-| 1. MCP server (stdio, strict validation) | A well-behaved downstream MCP server |
-| 2. MCP security gateway (RBAC on tools) | MCP Gateway — per-tool authorization |
-| 3. Streaming PII redaction | LLM Gateway — response-path guardrail |
-| 4. Token rate limiter + model fallback | LLM Gateway — rate limits + routing/failover |
+| 1. MCP server (stdio, strict validation) | A well-behaved downstream MCP server (also served over HTTP for the gateway) |
+| 2. MCP security gateway (RBAC on tools) | Per-tool authorization in front of an MCP server |
+| 3. Streaming PII redaction | LLM gateway, response-path guardrail |
+| 4. Token rate limiter + model fallback | LLM gateway, rate limits and routing/failover |
 
 ---
 
-## 2. Non-negotiable working rules
+## 1. Non-negotiable working rules
 
 0. **Delivery routine: follow `CONTRIBUTING.md`.** Branch per task
    (`task/N-<slug>`), small commits, CI green, then a **fresh independent
@@ -53,7 +34,7 @@ fail closed, auditable, low latency, and honest about its limits.**
    - **Security / negative tests** — malformed JSON, wrong types, oversize
      bodies, missing/forged/expired tokens, privilege escalation attempts,
      PII split across chunk boundaries, timeout races, SQL-injection-shaped keys.
-   - **End-to-end tests** — the combined system (see §4).
+   - **End-to-end tests** — the combined system (see §3).
    - Live tests against real providers are marked `@pytest.mark.live` and skip
      automatically when the API key env var is absent. Default `pytest` run is
      offline and deterministic.
@@ -79,7 +60,7 @@ fail closed, auditable, low latency, and honest about its limits.**
 
 ---
 
-## 3. Security rules (apply to every line of code)
+## 2. Security rules (apply to every line of code)
 
 ### Fail closed / deny by default
 - Unknown role, missing token, unparseable token, unknown method on a guarded
@@ -122,7 +103,7 @@ split follows who can act on the information:
 - Every response carries `X-Request-ID`, and every error body carries
   `request_id`. Support pastes that ID to find the full detail in the logs.
   That is the industry pattern (Stripe, OpenAI, Google AIP-193).
-- **Envelope per protocol** (defined once, in `common/`):
+- **One envelope per protocol** (each defined once, in the service that speaks it):
   - LLM gateway (OpenAI-compatible): the OpenAI error shape
     `{"error": {"message", "type", "code", "param", "request_id"}}`, so
     existing OpenAI/Anthropic-style SDKs parse it unchanged.
@@ -150,13 +131,26 @@ split follows who can act on the information:
   sites still log IDs, lengths and hashes rather than raw prompts or tool
   arguments.
 - **Where logs go (12-factor):** services write the event stream to
-  stdout/stderr and never manage log files. In Docker, a log shipper collects
-  container output and routes it to storage and search. The audit chain file
-  lives on its own volume.
+  stdout/stderr and never manage log files. In a container deployment, a log
+  shipper collects that output and routes it to storage and search, and the
+  audit chain file lives on its own volume.
 
 ### Secrets & config
 - Secrets only via environment variables / `.env` (git-ignored). A committed
-  `.env.example` documents every variable with fake values.
+  `.env.example` documents every variable with fake values, marking which are
+  required and showing the default of the rest.
+- **How configuration is loaded:** every entrypoint uses
+  `quilr_common.config.load_settings()`. Real environment variables come
+  first, then `.env` (read by the service itself; `QUILR_ENV_FILE` overrides
+  the path), then class defaults.
+  - Each settings class has its own prefix, `extra="forbid"` and
+    `dotenv_filtering="match_prefix"`, so one shared `.env` works and typos
+    fail at startup.
+  - Secrets have no defaults: they are required.
+  - Never set `env_file` on a settings class, because tests would then read
+    the developer's file. The root `conftest.py` turns file loading off for
+    the test run.
+  - Configuration errors name the variable and never echo its value.
 - No secrets in tests, fixtures, logs, or commit history. Test keys are
   generated at test time.
 
@@ -178,7 +172,7 @@ split follows who can act on the information:
 
 ---
 
-## 4. "Works together" — target architecture
+## 3. "Works together" — target architecture
 
 Each task lives in its own folder and runs standalone, **and** the pieces
 compose into one system with a real end-to-end path:
@@ -190,14 +184,15 @@ compose into one system with a real end-to-end path:
                      └───────────────────────────────────────────────────────────────┘
 
                      ┌──── MCP Security Gateway (T2) ────┐
- agent ────────────► │ JWT auth → JSON-RPC inspect → RBAC │ ──► MCP server (T1 tools, HTTP transport)
-                     └────────────────────────────────────┘     (T1 also runs standalone over stdio)
+ agent ────────────► │ JWT auth → JSON-RPC inspect → RBAC │ ──► T1 tools over HTTP (task1_mcp_server.serve_http)
+                     └────────────────────────────────────┘     (T1's brief transport, stdio, runs standalone)
 ```
 
-- Shared code (error envelope, JSON-RPC models, logging/audit, auth/JWT,
-  config) lives in a `common/` package — written once, tested once.
-- A root-level `docker-compose.yml` / Makefile target brings the whole system
-  up; a root `e2e/` test suite exercises the combined flow.
+- Shared code (settings loading, logging/audit, redaction) lives in the
+  `common/` package — written once, tested once.
+- The root `e2e/` suite starts every service as a real process, configured
+  only by a `.env` file, and exercises the combined flow. Docker packaging is
+  out of scope (decided with the user).
 - "Real working" means: real processes, real sockets, real SQLite file on
   disk, and a real LLM provider path (key via env). Mocks exist so tests are
   deterministic and so graders can run without keys — they are not a
@@ -205,18 +200,19 @@ compose into one system with a real end-to-end path:
 
 ---
 
-## 5. Repo conventions
+## 4. Repo conventions
 
 - **Python 3.12**, `asyncio` throughout, type hints everywhere, `mypy --strict`
   clean, `ruff` (lint + format) clean.
 - Layout (finalised in the scaffold step):
   ```
-  common/              shared library
-  task1_mcp_server/    src + tests + README.md
-  task2_mcp_gateway/
-  task3_pii_guardrail/
-  task4_model_router/
+  common/              shared library (quilr_common)
+  task1-mcp-server/    src + tests + README.md (package task1_mcp_server)
+  task2-mcp-gateway/
+  task3-pii-guardrail/
+  task4-model-router/
   e2e/                 cross-task end-to-end tests
+  conftest.py          test-run setup (.env loading off)
   MISTAKES.md
   ```
 - Each task README has: **What it does → How to run → Design & why this
@@ -228,13 +224,13 @@ compose into one system with a real end-to-end path:
 - Conventional Commits: `type(scope): short imperative title` (≤ 72 chars),
   blank line, then an extended body explaining **what and why**.
   Types: `feat`, `fix`, `test`, `docs`, `refactor`, `build`, `chore`, `ci`,
-  `perf`, `security`. Scopes: `common`, `task1`..`task4`, `e2e`, `docker`, `repo`.
+  `perf`, `security`. Scopes: `common`, `task1`..`task4`, `e2e`, `repo`.
 - **No AI attribution in commits**: no `Co-Authored-By` trailer, no
   "generated with" lines, no mention of AI tooling.
 - Never commit secrets, `.env`, SQLite files, or logs. Review
   `git status` and `git diff --cached` before every commit.
 
-## 6. Definition of done (per task)
+## 5. Definition of done (per task)
 
 - [ ] All requirements in `ASSESSMENT.md` for the task are met, line by line.
 - [ ] Unit + integration + security-negative tests written and passing.
