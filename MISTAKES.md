@@ -390,3 +390,34 @@ tests (including two end-to-end through the real SDK).
   raises SSE error events as status-200 `APIStatusError`s.
 - `Retry-After: inf` crashed the error mapping.
 - An empty configured key matched a blank or NBSP bearer token.
+
+## Task 4 — Rate limiter and model failover
+
+### Q1 — A blanket string replacement broke a call (caught by mypy)
+- **What happened:** to pass the serving model into every `self._chunk(...)`
+  call I replaced `", None)\n"` with `", None, model)\n"` across a block. It
+  also matched `anext(events, None)`, which would have crashed at runtime.
+- **Fix:** reverted that one site; mypy (`no overload variant of anext`)
+  caught it before any test ran.
+- **Prevention:** never pattern-replace across a block. Edit the exact call
+  sites, and count matches before replacing.
+
+### Q2 — Assumed the OpenAI SDK used `httpx` (caught by mypy)
+- **What happened:** the provider and its test injected an `httpx` client;
+  `openai` 3.x, like `anthropic` 2.x, is built on `httpx2`.
+- **Fix:** typed and injected `httpx2.AsyncClient`, and declared `httpx2` as
+  a direct dependency.
+
+### Q3 — Sized a live test from an assumption, not a measurement
+- **What happened:** the live rate-limit test assumed 30–40 tokens per real
+  call, so a 150-token budget admitted all 6 calls and the test failed.
+- **Fix:** read the test's SQLite file. Each call had settled to 22 tokens
+  (real usage; the reservation was 28), so accounting was right and the test
+  was wrong. A 60-token budget now forces the third call to 429, which costs 2
+  real calls instead of 6. The test also asserts settled rows hold real usage.
+- **Prevention:** before asserting on a live system, measure one real call.
+
+### Q4 — macOS `sed` has no `\b`
+- **What happened:** a rename with `sed 's/\b_retry_after(/…/'` changed the
+  definition but silently missed the call site.
+- **Fix:** did the rename with Python and verified with `grep` and mypy.
