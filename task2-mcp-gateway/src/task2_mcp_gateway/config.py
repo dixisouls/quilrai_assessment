@@ -12,7 +12,9 @@ from task2_mcp_gateway.auth import DEFAULT_ALGORITHMS, TokenVerifier
 
 
 class GatewaySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="forbid", frozen=True)
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_", extra="forbid", frozen=True, dotenv_filtering="match_prefix"
+    )
 
     # Where allowed traffic goes. Configuration only: never derived from a request.
     downstream_url: HttpUrl

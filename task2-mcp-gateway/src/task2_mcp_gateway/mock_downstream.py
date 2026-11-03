@@ -18,7 +18,8 @@ import uvicorn
 from mcp.server import Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
 
-from quilr_common.log import LoggingSettings, ServiceInfo, configure_logging, get_logger
+from quilr_common.config import load_settings, service_info
+from quilr_common.log import LoggingSettings, configure_logging, get_logger
 
 log = get_logger("mock_downstream")
 
@@ -70,9 +71,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
-    configure_logging(
-        ServiceInfo(name="mock-downstream", version="0.1.0", env="dev"), LoggingSettings()
-    )
+    configure_logging(service_info("mock-downstream", "0.1.0"), load_settings(LoggingSettings))
     app = build_mock_server().streamable_http_app(host=args.host)
     uvicorn.run(app, host=args.host, port=args.port, log_config=None, server_header=False)
 
