@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
@@ -14,7 +15,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from task3_pii_guardrail.api import create_app
+from task3_pii_guardrail.api import _Accounting, create_app
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
 from task3_pii_guardrail.providers import (
@@ -430,7 +431,7 @@ async def test_reservation_is_prompt_estimate_plus_max_tokens_then_settled_to_us
     assert _content(_sse_events(resp.text)) == "Hi [REDACTED]"  # bookkeeping events never leak
     [(tenant, tokens)] = limiter.reserved
     assert tenant.startswith("key-")
-    assert tokens == 40 // 4 + 50
+    assert tokens == 40 // 4 + 4 + 50  # ASCII chars / 4, per-message framing, max_tokens
     assert limiter.settled == [19]  # 12 in + 7 out, the provider's real numbers
 
 
@@ -482,7 +483,7 @@ async def test_usage_is_estimated_when_the_provider_reports_none(
     body = _body(stream=False, messages=[{"role": "user", "content": "y" * 20}])
     resp = await client.post("/v1/chat/completions", json=body, headers=HEADERS)
     assert resp.json()["model"] == "gpt-6.1-sol"  # reports the model that actually served
-    assert limiter.settled == [20 // 4 + 40 // 4]
+    assert limiter.settled == [20 // 4 + 4 + 40 // 4]
 
 
 async def test_serving_provider_is_reported(
@@ -493,3 +494,95 @@ async def test_serving_provider_is_reported(
     assert resp.headers["x-gateway-provider"] == "openai"
     chunks = [e for e in _sse_events(resp.text) if isinstance(e, dict)]
     assert {c["model"] for c in chunks} == {"gpt-6.1-sol"}
+
+
+# --- Review #5 regressions (Task 4 integration) -------------------------------------------
+
+
+@dataclass
+class BrokenLimiter(FakeLimiter):
+    fail_on: str = "reserve"
+
+    async def reserve(self, tenant: str, tokens: int) -> FakeDecision:
+        if self.fail_on == "reserve":
+            raise RuntimeError("database is locked /srv/var/ratelimit.sqlite3")
+        return await super().reserve(tenant, tokens)
+
+    async def settle(self, decision: FakeDecision, actual_tokens: int) -> None:
+        if self.fail_on == "settle":
+            raise RuntimeError("database is locked")
+        await super().settle(decision, actual_tokens)
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_limiter_failure_on_reserve_denies_with_the_standard_envelope(
+    provider: FakeProvider, stream: bool
+) -> None:
+    app = create_app(GatewaySettings(api_keys=[API_KEY]), provider, limiter=BrokenLimiter())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        resp = await c.post("/v1/chat/completions", json=_body(stream=stream), headers=HEADERS)
+    assert resp.status_code == 503
+    err = resp.json()["error"]
+    assert err["type"] == "service_unavailable"
+    assert err["request_id"] == resp.headers["x-request-id"]
+    assert "sqlite" not in resp.text and "locked" not in resp.text
+    assert provider.requests == []  # fails closed: no provider call without admission
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_settle_failure_never_replaces_a_served_response(
+    provider: FakeProvider, stream: bool
+) -> None:
+    provider.script = [Started("anthropic", "m"), "hello", Usage(3, 2), Finish("stop")]
+    app = create_app(
+        GatewaySettings(api_keys=[API_KEY]), provider, limiter=BrokenLimiter(fail_on="settle")
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw") as c:
+        resp = await c.post("/v1/chat/completions", json=_body(stream=stream), headers=HEADERS)
+    assert resp.status_code == 200
+    if stream:
+        assert _sse_events(resp.text)[-1] == "[DONE]"
+    else:
+        assert resp.json()["choices"][0]["message"]["content"] == "hello"
+
+
+async def test_settlement_survives_cancellation_of_the_request_task() -> None:
+    # Client disconnect: Starlette cancels the response body; settlement must still land.
+    @dataclass
+    class SlowLimiter(FakeLimiter):
+        async def settle(self, decision: FakeDecision, actual_tokens: int) -> None:
+            await asyncio.sleep(0.1)  # e.g. waiting for a free executor thread
+            self.settled.append(actual_tokens)
+
+    limiter = SlowLimiter()
+    acct = _Accounting(limiter, prompt_tokens=10, decision=FakeDecision(allowed=True))
+    task = asyncio.create_task(acct.settle())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.2)
+    assert limiter.settled == [0]  # refund recorded despite the cancellation
+
+
+@pytest.mark.parametrize(
+    ("messages", "minimum"),
+    [
+        ([{"role": "user", "content": "\u6f22" * 1000}], 1000),  # CJK: ~1 token per character
+        ([{"role": "user", "content": "a"}] * 50, 50 * 4),  # per-message framing overhead
+        ([{"role": "user", "content": "word " * 400}], 400),  # English stays close to real
+    ],
+)
+async def test_reservation_estimate_does_not_undercount_common_text(
+    limited: tuple[httpx.AsyncClient, FakeLimiter],
+    provider: FakeProvider,
+    messages: list[dict[str, str]],
+    minimum: int,
+) -> None:
+    client, limiter = limited
+    provider.script = [Finish("stop")]
+    await client.post(
+        "/v1/chat/completions", json=_body(messages=messages, max_tokens=1), headers=HEADERS
+    )
+    [(_, reserved)] = limiter.reserved
+    assert reserved - 1 >= minimum  # minus max_tokens

@@ -18,6 +18,7 @@ Latency and memory:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -56,6 +57,7 @@ from task3_pii_guardrail.providers import (
 from task3_pii_guardrail.redactor import StreamRedactor, redact_counted
 
 log = get_logger(__name__)
+_BACKGROUND: set[asyncio.Task[None]] = set()  # strong refs to in-flight settlements
 
 _PROVIDER_STATUS: Final = {
     "rate_limited": 429,
@@ -164,6 +166,14 @@ class _Accounting:
         return out
 
     async def settle(self) -> None:
+        """Settle once. Survives cancellation and never raises.
+
+        Runs in its own task behind ``asyncio.shield``. When a client disconnects,
+        Starlette cancels the response body, and its anyio scope re-cancels every
+        await in cleanup code. A plain ``await`` here could then be dropped before
+        the UPDATE ran, leaving the worst-case reservation charged for the whole
+        window. The shielded task finishes regardless.
+        """
         if self.settled or self.limiter is None or self.decision is None:
             return
         self.settled = True
@@ -173,13 +183,37 @@ class _Accounting:
             actual = self.prompt_tokens + math.ceil(self.output_chars / 4)
         else:  # no provider ever served the request: refund
             actual = 0
-        await self.limiter.settle(self.decision, actual)
+        task = asyncio.create_task(self._settle_logged(self.limiter, self.decision, actual))
+        _BACKGROUND.add(task)
+        task.add_done_callback(_BACKGROUND.discard)
+        await asyncio.shield(task)
+
+    @staticmethod
+    async def _settle_logged(limiter: Limiter, decision: Any, actual: int) -> None:
+        try:
+            await limiter.settle(decision, actual)
+        except Exception:
+            # A served response must never be replaced or cut off by bookkeeping.
+            log.exception("rate-limit settlement failed", extra={"tokens": actual})
+
+
+_TOKENS_PER_MESSAGE: Final = 4  # role/format framing each provider adds per message
 
 
 def _estimate_prompt_tokens(chat: ChatRequest) -> int:
-    # ~4 chars per token. Only used to size the reservation; settlement uses the
-    # provider's real usage.
-    return math.ceil(sum(len(m.content) for m in chat.messages) / 4)
+    """Size the reservation. Settlement later replaces it with real usage.
+
+    ASCII text averages ~4 characters per token; non-ASCII text (CJK, emoji,
+    accented scripts) is often ~1 token per character, so each non-ASCII
+    character counts as a full token. Plus per-message framing. This is a
+    near-upper bound for common text, not a guarantee for every tokenizer.
+    """
+    total = 0
+    for message in chat.messages:
+        non_ascii = sum(1 for ch in message.content if ord(ch) > 127)  # noqa: PLR2004
+        total += math.ceil((len(message.content) - non_ascii) / 4) + non_ascii
+        total += _TOKENS_PER_MESSAGE
+    return total
 
 
 async def _observe(
@@ -240,12 +274,8 @@ class _Gateway:
         if isinstance(chat, Response):
             return chat
         acct = _Accounting(self._limiter, _estimate_prompt_tokens(chat))
-        if self._limiter is not None:
-            worst_case = acct.prompt_tokens + (chat.max_tokens or self._settings.default_max_tokens)
-            decision = await self._limiter.reserve(principal, worst_case)
-            if not decision.allowed:
-                return self._limited(decision, request_id)
-            acct.decision = decision
+        if (refusal := await self._admit(principal, chat, acct, request_id)) is not None:
+            return refusal
 
         events = _observe(self._provider.stream(chat), acct)
         try:
@@ -274,6 +304,36 @@ class _Gateway:
                 },
             )
         return await self._complete(events, first, request_id, acct)
+
+    async def _admit(
+        self, principal: str, chat: ChatRequest, acct: _Accounting, request_id: str
+    ) -> Response | None:
+        """Reserve the worst case for this tenant. Returns a refusal, or None to proceed."""
+        if self._limiter is None:
+            return None
+        worst_case = acct.prompt_tokens + (chat.max_tokens or self._settings.default_max_tokens)
+        try:
+            decision = await self._limiter.reserve(principal, worst_case)
+        except Exception:
+            # Fail closed: without a working limiter, nothing is admitted.
+            log.exception("rate limiter unavailable")
+            emit_audit(
+                AuditEvent(
+                    action="llm.rate_limit",
+                    decision=Decision.ERROR,
+                    reason="rate limiter unavailable; request denied",
+                )
+            )
+            return _error(
+                503,
+                "The gateway is temporarily unable to admit requests. Retry shortly.",
+                "service_unavailable",
+                request_id,
+            )
+        if not decision.allowed:
+            return self._limited(decision, request_id)
+        acct.decision = decision
+        return None
 
     @staticmethod
     def _limited(decision: Any, request_id: str) -> JSONResponse:
