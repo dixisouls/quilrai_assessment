@@ -421,3 +421,31 @@ tests (including two end-to-end through the real SDK).
 - **What happened:** a rename with `sed 's/\b_retry_after(/…/'` changed the
   definition but silently missed the call site.
 - **Fix:** did the rename with Python and verified with `grep` and mypy.
+
+### Q5 — The CI coverage gate was never enforced, and I reported CI as green
+- **What happened:** the pre-push hook blocked the Task 4 push at 88.4%
+  coverage. Investigating showed `main` had been at **89.51%** in CI too.
+  CI printed `FAIL Required test coverage of 90.0% not reached`, but the
+  pytest step exited 0, so every "CI green" I reported since Task 3 hid a
+  failed gate. `CONTRIBUTING.md` claimed a gate CI didn't enforce.
+- **Root cause (two parts):**
+  - The e2e suites stop their uvicorn servers with SIGTERM, and coverage
+    doesn't save data on SIGTERM by default. Code that only runs inside those
+    servers counted as unexecuted.
+  - Under CI, pytest-cov reported the failure without failing the step. The
+    same command exits 1 locally; the cause of the difference isn't
+    established.
+- **Fix:** `sigterm = true` in `[tool.coverage.run]` (96.96%), and an explicit
+  CI step, `coverage report`, which exits 2 below `fail_under` regardless of
+  pytest-cov. Both were checked: `--fail-under=99.9` exits 2, the real gate
+  exits 0.
+- **Prevention:** my local gate is `make check` (includes `--cov`), not a
+  hand-picked subset. When a check says "success", read *what* it checked.
+
+### Q6 — A commit that silently didn't happen
+- **What happened:** I ran `git commit -F -` without its message heredoc. The
+  commit failed, the push still went out (the hook passed on the uncommitted
+  working tree), and the remote briefly lacked the fix it was meant to carry.
+- **Fix:** committed properly and pushed again. `git log -1` and
+  `git ls-remote` were checked before reporting.
+- **Prevention:** verify `git log -1` after every commit, before pushing.

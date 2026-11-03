@@ -32,7 +32,7 @@ and again in CI. AI-tool attribution trailers are rejected.
 | `ruff format` | pre-commit | ✓ | Style drift |
 | `ruff check` (incl. bandit `S`, `T20` print-ban, `ASYNC`) | pre-commit | ✓ | Bugs, insecure patterns, stray `print` to stdout |
 | `mypy --strict` | pre-push | ✓ | Type errors |
-| `pytest` + coverage ≥ 90 % (branch) | pre-push | ✓ | Regressions, untested code |
+| `pytest` + coverage ≥ 90 % (branch; enforced by an explicit `coverage report` step, incl. code running inside spawned test servers) | pre-push | ✓ | Regressions, untested code |
 | Commit policy | commit-msg | ✓ | Non-conventional messages, AI attribution |
 | Trojan Source scan | pre-commit | ✓ | Invisible bidi / zero-width characters |
 | `uv lock --check` | `make security` | ✓ | Lockfile out of sync with `pyproject.toml` |
