@@ -159,11 +159,14 @@ The TTFT test lives in the e2e suite on purpose: httpx's in-process
 `ASGITransport` buffers whole responses, so latency can only be observed over
 a real socket.
 
+## Scope
+
+As the brief specifies: the **returning response stream** is intercepted and
+redacted, and the sensitive **patterns** are the three types it names (emails,
+SSNs, credit-card numbers). Prompts are forwarded to the provider unchanged.
+
 ## Known limitations
 
-- **Pattern-based detection.** It covers the three types the brief names
-  (emails, US SSNs, card numbers). Names, addresses, phone numbers and
-  non-US identifiers need NER/ML classifiers (QuilrAI's "custom intents").
 - **ASCII matching.** Patterns use `re.ASCII` (needed for chunk-invariant
   boundaries), so full-width digits or a zero-width character inside a value
   (`jane<U+200B>@example.com`) evade detection, in whole-text and streaming
@@ -173,8 +176,6 @@ a real socket.
 - **Truncated output.** If the model stops at `max_tokens` mid-value
   (`"jane.do"`), the fragment no longer matches and is emitted as-is, exactly
   as whole-text redaction would treat it.
-- **Response path only.** PII in the *prompt* is sent to the provider
-  unredacted. Request-side redaction is a separate guardrail.
 - **Unbroken runs over 2048 chars** are force-emitted in blocks. That path is
   allowed to over-redact (a truncated digit run that looks like a card) so it
   can never leak.
