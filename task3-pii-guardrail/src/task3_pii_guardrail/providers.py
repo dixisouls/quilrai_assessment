@@ -85,7 +85,7 @@ _FALLBACK_BETA: Final = "server-side-fallback-2026-07-01"
 _MAX_RETRY_AFTER_S: Final = 3600.0
 
 
-def _retry_after(raw: str | None) -> float | None:
+def parse_retry_after(raw: str | None) -> float | None:
     """Upstream is only semi-trusted: accept finite, non-negative, bounded values."""
     try:
         value = float(raw) if raw is not None else None
@@ -102,7 +102,7 @@ def _map_error(exc: anthropic.APIError) -> ProviderError:
         return ProviderError(
             "rate_limited",
             detail,
-            retry_after=_retry_after(exc.response.headers.get("retry-after")),
+            retry_after=parse_retry_after(exc.response.headers.get("retry-after")),
         )
     if isinstance(exc, anthropic.APITimeoutError):
         return ProviderError("timeout", detail)
