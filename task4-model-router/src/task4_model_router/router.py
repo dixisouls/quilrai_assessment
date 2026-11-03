@@ -33,7 +33,7 @@ from typing import Final
 
 from quilr_common.log import AuditEvent, Decision, emit_audit, get_logger
 from task3_pii_guardrail.models import ChatRequest
-from task3_pii_guardrail.providers import Provider, ProviderError, ProviderEvent
+from task3_pii_guardrail.providers import Provider, ProviderError, ProviderEvent, close_shielded
 
 log = get_logger(__name__)
 
@@ -81,7 +81,7 @@ class FailoverProvider:
             async for event in events:
                 yield event
         finally:
-            await events.aclose()
+            await close_shielded(events.aclose)
 
 
 async def _start(
@@ -95,9 +95,9 @@ async def _start(
     except StopAsyncIteration:
         first = None
     except TimeoutError:
-        await events.aclose()
+        await close_shielded(events.aclose)
         raise ProviderError("timeout", f"no response within {timeout_s:.1f}s") from None
     except BaseException:
-        await events.aclose()
+        await close_shielded(events.aclose)
         raise
     return events, first
