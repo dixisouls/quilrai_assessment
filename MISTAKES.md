@@ -309,3 +309,84 @@ in-scope findings (3 MEDIUM, 3 LOW), all now fixed with regression tests, and
 - The reviewer noted that a broad `pkill -f task2_mcp_gateway` (which I also
   used during the live demo) could kill a user's own gateway. From now on I
   stop processes by PID.
+
+## Task 3 — LLM gateway streaming guardrail
+
+### P1 — Piped a gate's output and committed past a failure
+- **What happened:** I ran `mypy | tail -1` inside an `&&` chain. mypy failed
+  (two `test_integration.py` modules collided), but the chain saw `tail`'s
+  exit code and four commits went ahead. Fixing the collision then exposed a
+  real type error that the masked run had hidden too.
+- **Fix:** renamed the module to `test_redaction_e2e.py` and fixed the
+  `Popen` typing. Nothing had been pushed; CI would have caught it.
+- **Prevention:** never pipe a gate inside an `&&` chain. Run gates unpiped
+  and end with an explicit `echo "ALL GATES PASSED"`.
+
+### P2 — Test transport that silently buffers
+- **What happened:** the in-process TTFT test failed. The cause wasn't the
+  gateway: `httpx.ASGITransport` collects the whole response before returning
+  it, which a 6-line probe confirmed.
+- **Fix:** latency is tested only over real sockets (the e2e suite).
+
+### P3 — Two wrong expectations, both caught by tests
+- The card rule matched `000-12-3456 666…` (13 digits across mixed separators
+  that happened to pass Luhn). Fixed by requiring a real PAN layout.
+- The first TTFT scenario paused the mock after `"You"`, which correctly
+  can't be released yet (it could still become `You@x.com`). The test was
+  wrong, not the redactor; the mock now pauses after `" sa"`.
+
+### P4 — Two sloppy edits of my own
+- A redaction counter counted `[REDACTED]` in the final text, which
+  over-counts when the model's output already contains the marker. It now
+  counts markers added per rule.
+- A benchmark printout contained a hardcoded "max holdback seen" claim I
+  hadn't measured. It's not quoted anywhere; the bound is enforced by a test.
+
+### P5 — Hardcoded fake keys in tests (broke my own rule), caught by CI
+- **What happened:** CI's gitleaks scan flagged two hardcoded client keys in
+  the Task 3 tests and a literal key in a README curl example. They were fake,
+  but `CLAUDE.md` says test keys are generated at test time.
+- **Fix:** tests use `secrets.token_urlsafe` per run; the README derives a key
+  into a shell variable. The three findings in already-pushed commits are
+  pinned by exact fingerprint in `.gitleaksignore`, so new occurrences still
+  fail. Rewriting pushed history was avoided.
+- **Prevention:** grep new test files for string literals assigned to
+  `*_KEY`/`*TOKEN*` names before committing.
+
+## Independent review #4 (branch `task/3-pii-guardrail`)
+
+The reviewer fuzzed the normal streaming path with 200,000 random inputs and
+found 0 mismatches against whole-text redaction. It found **two real PII
+leaks in edge paths** plus 7 smaller issues, all now fixed with regression
+tests (including two end-to-end through the real SDK).
+
+### R4-1 — Values meeting at a content-block boundary leaked (MEDIUM)
+- **What happened:** text from all of a response's content blocks went into
+  one redactor. Block 1 ending `4111111111111111` and block 2 starting `0`
+  became one 17-digit run that failed Luhn, so the card went out in clear. The
+  same happened to an SSN. Multi-block responses are real (citations, the
+  refusal-fallback switch I enabled myself).
+- **Root cause:** I modelled the provider output as "a stream of text"
+  instead of "a stream of blocks of text".
+- **Fix:** the provider yields `BlockEnd`; each block is redacted
+  independently in both paths.
+- **Prevention:** when adapting a provider stream, enumerate *every* event
+  type and decide what each one means for the guardrail.
+
+### R4-2 — The forced-cut search window was shorter than the longest match (MEDIUM)
+- **What happened:** the ±400-character window couldn't see a 665-character
+  email straddling the cut, so the cut split it and both halves escaped. My
+  docstring and README said that path "can only over-redact".
+- **Fix:** the window is derived from the pattern's own bounds.
+- **Prevention:** compute bounds from the patterns rather than picking round
+  numbers, and test the edge of every bound.
+
+### R4-3 — Context and error-path gaps (MEDIUM/LOW)
+- The streaming audit event lost `request_id` and `principal`. Starlette runs
+  the response generator *after* the handler's context has exited.
+- `RecursionError` from deeply nested JSON, and unexpected errors on the
+  non-streaming path, produced bare 500s.
+- A mid-stream overload was reported as "rejected the request". The SDK
+  raises SSE error events as status-200 `APIStatusError`s.
+- `Retry-After: inf` crashed the error mapping.
+- An empty configured key matched a blank or NBSP bearer token.

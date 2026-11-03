@@ -3,7 +3,7 @@ name = "quilr-assessment"
 version = "0.1.0"
 description = "QuilrAI assessment: MCP server, MCP security gateway, LLM gateway guardrails and routing"
 requires-python = ">=3.12,<3.13"
-dependencies = ["quilr-common", "task1-mcp-server", "task2-mcp-gateway"]
+dependencies = ["quilr-common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail"]
 
 [dependency-groups]
 dev = [
@@ -23,18 +23,22 @@ package = false
 required-version = "==0.13.6"
 
 [tool.uv.workspace]
-members = ["common", "task1-mcp-server", "task2-mcp-gateway"]
+members = ["common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail"]
 
 [tool.uv.sources]
 quilr-common = { workspace = true }
 task1-mcp-server = { workspace = true }
 task2-mcp-gateway = { workspace = true }
+task3-pii-guardrail = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["common/tests", "scripts/tests", "task1-mcp-server/tests", "task2-mcp-gateway/tests"]
+testpaths = [
+    "common/tests", "scripts/tests", "task1-mcp-server/tests", "task2-mcp-gateway/tests",
+    "task3-pii-guardrail/tests",
+]
 pythonpath = ["scripts"]
 markers = [
     "live: hits real external providers; skipped unless the relevant API key is set",
@@ -47,7 +51,7 @@ branch = true
 # Integration tests spawn real server processes; measure those too.
 patch = ["subprocess"]
 parallel = true
-source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway"]
+source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]
@@ -66,7 +70,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "SIM", "RET", "PTH
 ignore = ["TRY003", "PLR0913"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["quilr_common", "task1_mcp_server", "task2_mcp_gateway", "check_bidi", "check_commits"]
+known-first-party = [
+    "quilr_common", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail",
+    "check_bidi", "check_commits",
+]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is the pytest idiom; magic values are fine in test expectations.
@@ -80,8 +87,9 @@ files = [
     "common/src", "common/tests", "scripts",
     "task1-mcp-server/src", "task1-mcp-server/tests",
     "task2-mcp-gateway/src", "task2-mcp-gateway/tests",
+    "task3-pii-guardrail/src", "task3-pii-guardrail/tests",
 ]
-mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:scripts"
+mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:task3-pii-guardrail/src:scripts"
 explicit_package_bases = true
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
