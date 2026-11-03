@@ -241,7 +241,7 @@ def live_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         "LLM_GATEWAY_DEFAULT_MAX_TOKENS": "20",
         "LLM_GATEWAY_PORT": str(port),
         "LLM_ROUTER_DB_PATH": str(tmp / "ratelimit.sqlite3"),
-        "LLM_ROUTER_TOKENS_PER_MINUTE": "150",
+        "LLM_ROUTER_TOKENS_PER_MINUTE": "60",
     }
     proc = _spawn([sys.executable, "-m", "task4_model_router"], tmp / "gateway.log", env)
     try:
@@ -259,15 +259,24 @@ def live_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
 @pytest.mark.live
 @LIVE
 def test_live_primary_and_live_rate_limit(live_stack: Stack) -> None:
-    first = _post(live_stack, "Reply with the single word: ok")
-    assert first.status_code == 200, first.text
-    assert first.headers["x-gateway-provider"] == "anthropic"
-    statuses = [first.status_code]
-    for _ in range(5):  # ~30-40 real tokens each against a 150-token budget
-        statuses.append(_post(live_stack, "Reply with the single word: ok").status_code)
-        if statuses[-1] == 429:
+    # A real call settles to the provider's real usage (~20 tokens for this prompt),
+    # and each new request reserves prompt + max_tokens (~28) against a 60-token budget,
+    # so the gateway itself must refuse the third call before contacting any provider.
+    statuses = []
+    for _ in range(4):
+        resp = _post(live_stack, "Reply with the single word: ok")
+        statuses.append(resp.status_code)
+        if resp.status_code == 200:
+            assert resp.headers["x-gateway-provider"] == "anthropic"
+        if resp.status_code == 429:
+            assert resp.json()["error"]["code"] == "token_rate_limit_exceeded"
             break
-    assert statuses[-1] == 429, statuses  # the gateway's own limit, before any provider call
+    assert statuses == [200, 200, 429], statuses
+    with sqlite3.connect(live_stack.db) as db:
+        settled = [row[0] for row in db.execute("SELECT tokens FROM token_usage ORDER BY id")]
+    reservation = 31 // 4 + 1 + 20  # ceil(prompt chars / 4) + max_tokens
+    assert len(settled) == 2
+    assert all(0 < tokens != reservation for tokens in settled), settled  # real usage, not estimate
 
 
 @pytest.mark.live
