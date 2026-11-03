@@ -390,3 +390,111 @@ tests (including two end-to-end through the real SDK).
   raises SSE error events as status-200 `APIStatusError`s.
 - `Retry-After: inf` crashed the error mapping.
 - An empty configured key matched a blank or NBSP bearer token.
+
+## Task 4 — Rate limiter and model failover
+
+### Q1 — A blanket string replacement broke a call (caught by mypy)
+- **What happened:** to pass the serving model into every `self._chunk(...)`
+  call I replaced `", None)\n"` with `", None, model)\n"` across a block. It
+  also matched `anext(events, None)`, which would have crashed at runtime.
+- **Fix:** reverted that one site; mypy (`no overload variant of anext`)
+  caught it before any test ran.
+- **Prevention:** never pattern-replace across a block. Edit the exact call
+  sites, and count matches before replacing.
+
+### Q2 — Assumed the OpenAI SDK used `httpx` (caught by mypy)
+- **What happened:** the provider and its test injected an `httpx` client;
+  `openai` 3.x, like `anthropic` 2.x, is built on `httpx2`.
+- **Fix:** typed and injected `httpx2.AsyncClient`, and declared `httpx2` as
+  a direct dependency.
+
+### Q3 — Sized a live test from an assumption, not a measurement
+- **What happened:** the live rate-limit test assumed 30–40 tokens per real
+  call, so a 150-token budget admitted all 6 calls and the test failed.
+- **Fix:** read the test's SQLite file. Each call had settled to 22 tokens
+  (real usage; the reservation was 28), so accounting was right and the test
+  was wrong. A 60-token budget now forces the third call to 429, which costs 2
+  real calls instead of 6. The test also asserts settled rows hold real usage.
+- **Prevention:** before asserting on a live system, measure one real call.
+
+### Q4 — macOS `sed` has no `\b`
+- **What happened:** a rename with `sed 's/\b_retry_after(/…/'` changed the
+  definition but silently missed the call site.
+- **Fix:** did the rename with Python and verified with `grep` and mypy.
+
+### Q5 — The CI coverage gate was never enforced, and I reported CI as green
+- **What happened:** the pre-push hook blocked the Task 4 push at 88.4%
+  coverage. Investigating showed `main` had been at **89.51%** in CI too.
+  CI printed `FAIL Required test coverage of 90.0% not reached`, but the
+  pytest step exited 0, so every "CI green" I reported since Task 3 hid a
+  failed gate. `CONTRIBUTING.md` claimed a gate CI didn't enforce.
+- **Root cause (two parts):**
+  - The e2e suites stop their uvicorn servers with SIGTERM, and coverage
+    doesn't save data on SIGTERM by default. Code that only runs inside those
+    servers counted as unexecuted.
+  - Under CI, pytest-cov reported the failure without failing the step. The
+    same command exits 1 locally; the cause of the difference isn't
+    established.
+- **Fix:** `sigterm = true` in `[tool.coverage.run]` (96.96%), and an explicit
+  CI step, `coverage report`, which exits 2 below `fail_under` regardless of
+  pytest-cov. Both were checked: `--fail-under=99.9` exits 2, the real gate
+  exits 0.
+- **Prevention:** my local gate is `make check` (includes `--cov`), not a
+  hand-picked subset. When a check says "success", read *what* it checked.
+
+### Q6 — A commit that silently didn't happen
+- **What happened:** I ran `git commit -F -` without its message heredoc. The
+  commit failed, the push still went out (the hook passed on the uncommitted
+  working tree), and the remote briefly lacked the fix it was meant to carry.
+- **Fix:** committed properly and pushed again. `git log -1` and
+  `git ls-remote` were checked before reporting.
+- **Prevention:** verify `git log -1` after every commit, before pushing.
+
+## Independent review #5 (branch `task/4-model-router`)
+
+The reviewer ran the gateway and mocks as real processes and found **no
+accounting or failover bypass**:
+- the 3000 ms failover closed the losing connection (checked with `lsof`);
+- 4 real processes admitted exactly 25 of 25;
+- window boundaries were exact.
+
+It raised 5 in-scope findings (2 HIGH, 2 MEDIUM, 1 LOW), all fixed with
+regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
+
+### R5-1 — Settlement could be lost on client disconnect (HIGH)
+- **What happened:** my `finally: await acct.settle()` carried the comment
+  "also on client disconnect". Under Starlette's anyio task group, the
+  cancelled response body re-cancels every await in cleanup, so the UPDATE
+  could be dropped. The worst-case reservation then stayed charged for 60 s.
+  Under a busy executor it happened on 5 of 5 disconnects.
+- **Root cause:** I assumed `finally` plus `await` is enough for cleanup in
+  async code. Under structured cancellation it isn't.
+- **Fix:** settlement runs in its own task behind `asyncio.shield`. A test
+  cancels the awaiting task mid-settlement and asserts the refund still lands.
+- **Prevention:** any cleanup that *must* happen in async code gets shielded,
+  and gets a cancellation test.
+
+### R5-2 — Limiter errors and settle errors escaped the standard envelope (HIGH)
+- A locked database gave Starlette's bare 500 (still denied, but off-contract).
+  A settle failure could replace a response that had already been served. Now:
+  503 in the envelope on reserve, logged-only on settle.
+
+### R5-3 — "The reservation can never under-count" was false (MEDIUM)
+- chars/4 estimated 190k CJK characters at 47.5k tokens. The estimate now
+  counts non-ASCII characters as full tokens plus per-message framing, and the
+  claim is corrected in the README.
+
+### R5-4 — Backup SDK retry turned a 429 into a 504 (MEDIUM)
+- The OpenAI SDK honours `Retry-After` up to 120 s, so it slept inside the
+  backup deadline. Backup retries now default to 0, like the primary.
+
+### R5-5 — A new real multi-process test exposed a startup race
+- **What happened:** adding the 4-process test the reviewer asked for (the old
+  "two processes" test used two connections in one process) showed workers
+  crashing with `database is locked` at startup in 2 of 5 runs.
+  `PRAGMA journal_mode=WAL` needs an exclusive lock and doesn't wait on
+  `busy_timeout`.
+- **Fix:** skip the switch when the file is already WAL; otherwise retry with
+  backoff. It now passes 10/10 runs.
+- **Prevention:** "concurrent" tests must use the real concurrency unit
+  (processes, here), not a stand-in.

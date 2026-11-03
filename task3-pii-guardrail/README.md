@@ -52,6 +52,27 @@ gateway audit:  llm.response_redaction redact | 3 sensitive value(s) redacted fr
 PII occurrences in the gateway's own log:  0
 ```
 
+### Against real Claude (`claude-opus-5-5`)
+
+Run by the user with their own key, through the same gateway:
+
+```text
+→ "Repeat exactly, with no other text: Contact jane.doe@example.com, SSN 123-45-6789,
+   card 4111 1111 1111 1111."                                            (stream: true)
+← data: {…"delta":{"content":"Contact "}…}
+← data: {…"delta":{"content":"[REDACTED], SSN "}…}
+← data: {…"delta":{"content":"[REDACTED], card "}…}
+← data: {…"delta":{"content":"[REDACTED]."}…}
+← data: {…"delta":{},"finish_reason":"stop"}…}
+← data: [DONE]
+
+→ "Repeat exactly: my email is jane.doe@example.com"                    (stream: false)
+← {"choices":[{"message":{"role":"assistant","content":"my email is [REDACTED]"},…}]}
+```
+
+Each delta left the gateway as soon as it was safe. No fragment of any value
+(`jane.do`, `4111`) ever reached the client.
+
 **Measured cost:** the redactor takes **0.67 µs per chunk**: a 61 KB stream in
 15,700 token-sized chunks (≈ 4 chars) took 10.6 ms in total. Model tokens
 arrive tens of milliseconds apart, so the guardrail adds no noticeable

@@ -3,7 +3,10 @@ name = "quilr-assessment"
 version = "0.1.0"
 description = "QuilrAI assessment: MCP server, MCP security gateway, LLM gateway guardrails and routing"
 requires-python = ">=3.12,<3.13"
-dependencies = ["quilr-common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail"]
+dependencies = [
+    "quilr-common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail",
+    "task4-model-router",
+]
 
 [dependency-groups]
 dev = [
@@ -23,13 +26,14 @@ package = false
 required-version = "==0.13.6"
 
 [tool.uv.workspace]
-members = ["common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail"]
+members = ["common", "task1-mcp-server", "task2-mcp-gateway", "task3-pii-guardrail", "task4-model-router"]
 
 [tool.uv.sources]
 quilr-common = { workspace = true }
 task1-mcp-server = { workspace = true }
 task2-mcp-gateway = { workspace = true }
 task3-pii-guardrail = { workspace = true }
+task4-model-router = { workspace = true }
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
@@ -37,7 +41,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = [
     "common/tests", "scripts/tests", "task1-mcp-server/tests", "task2-mcp-gateway/tests",
-    "task3-pii-guardrail/tests",
+    "task3-pii-guardrail/tests", "task4-model-router/tests",
 ]
 pythonpath = ["scripts"]
 markers = [
@@ -51,7 +55,8 @@ branch = true
 # Integration tests spawn real server processes; measure those too.
 patch = ["subprocess"]
 parallel = true
-source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail"]
+sigterm = true  # servers in e2e tests are stopped with SIGTERM; save their data too
+source = ["quilr_common", "scripts", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail", "task4_model_router"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]
@@ -72,6 +77,7 @@ ignore = ["TRY003", "PLR0913"]
 [tool.ruff.lint.isort]
 known-first-party = [
     "quilr_common", "task1_mcp_server", "task2_mcp_gateway", "task3_pii_guardrail",
+    "task4_model_router",
     "check_bidi", "check_commits",
 ]
 
@@ -88,8 +94,9 @@ files = [
     "task1-mcp-server/src", "task1-mcp-server/tests",
     "task2-mcp-gateway/src", "task2-mcp-gateway/tests",
     "task3-pii-guardrail/src", "task3-pii-guardrail/tests",
+    "task4-model-router/src", "task4-model-router/tests",
 ]
-mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:task3-pii-guardrail/src:scripts"
+mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:task3-pii-guardrail/src:task4-model-router/src:scripts"
 explicit_package_bases = true
 python_version = "3.12"
 plugins = ["pydantic.mypy"]

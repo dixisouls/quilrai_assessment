@@ -1,0 +1,29 @@
+[project]
+name = "task4-model-router"
+version = "0.1.0"
+description = "Task 4: token-aware rate limiter (SQLite) and primary/backup model failover"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "quilr-common",
+    "task3-pii-guardrail",      # the gateway this module plugs into (auth, redaction, SSE)
+    "openai>=3.44,<4",          # official SDK for the backup provider
+    "httpx2>=2.16,<3",          # the HTTP client openai 3.x is built on (typed injection in tests)
+    "pydantic>=2.14,<3",
+    "pydantic-settings>=2.16,<3",
+    "uvicorn>=0.54,<1",
+    "starlette>=1.10,<2",
+]
+
+[project.scripts]
+task4-model-router = "task4_model_router.__main__:main"
+
+[tool.uv.sources]
+quilr-common = { workspace = true }
+task3-pii-guardrail = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task4_model_router"]

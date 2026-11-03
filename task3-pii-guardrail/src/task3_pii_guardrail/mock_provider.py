@@ -5,6 +5,7 @@ value in the prompt is guaranteed to be split across stream chunks. Markers in
 the user message script failures:
 
 * ``[[status:429]]`` / ``[[status:529]]`` → error response with that status
+* ``[[hang:N]]`` → wait N seconds before answering at all
 * ``[[slow]]`` → pause 1 s after the second delta (by then "You " is complete)
 * ``[[midstream-error]]`` → an ``overloaded_error`` event after a few deltas
 * ``[[blocks]]`` → three text blocks whose values meet at the block boundaries
@@ -39,6 +40,8 @@ def _event(name: str, data: dict[str, Any]) -> bytes:
 async def _messages(request: Request) -> Response:
     body = await request.json()
     user = next((m["content"] for m in reversed(body["messages"]) if m["role"] == "user"), "")
+    if (hang := re.search(r"\[\[hang:(\d+)\]\]", user)) is not None:
+        await asyncio.sleep(int(hang.group(1)))  # endpoint slow to answer (failover timeout)
     if (status := re.search(r"\[\[status:(\d{3})\]\]", user)) is not None:
         code = int(status.group(1))
         return JSONResponse(
