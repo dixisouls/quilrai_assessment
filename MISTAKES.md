@@ -449,3 +449,52 @@ tests (including two end-to-end through the real SDK).
 - **Fix:** committed properly and pushed again. `git log -1` and
   `git ls-remote` were checked before reporting.
 - **Prevention:** verify `git log -1` after every commit, before pushing.
+
+## Independent review #5 (branch `task/4-model-router`)
+
+The reviewer ran the gateway and mocks as real processes and found **no
+accounting or failover bypass**:
+- the 3000 ms failover closed the losing connection (checked with `lsof`);
+- 4 real processes admitted exactly 25 of 25;
+- window boundaries were exact.
+
+It raised 5 in-scope findings (2 HIGH, 2 MEDIUM, 1 LOW), all fixed with
+regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
+
+### R5-1 — Settlement could be lost on client disconnect (HIGH)
+- **What happened:** my `finally: await acct.settle()` carried the comment
+  "also on client disconnect". Under Starlette's anyio task group, the
+  cancelled response body re-cancels every await in cleanup, so the UPDATE
+  could be dropped. The worst-case reservation then stayed charged for 60 s.
+  Under a busy executor it happened on 5 of 5 disconnects.
+- **Root cause:** I assumed `finally` plus `await` is enough for cleanup in
+  async code. Under structured cancellation it isn't.
+- **Fix:** settlement runs in its own task behind `asyncio.shield`. A test
+  cancels the awaiting task mid-settlement and asserts the refund still lands.
+- **Prevention:** any cleanup that *must* happen in async code gets shielded,
+  and gets a cancellation test.
+
+### R5-2 — Limiter errors and settle errors escaped the standard envelope (HIGH)
+- A locked database gave Starlette's bare 500 (still denied, but off-contract).
+  A settle failure could replace a response that had already been served. Now:
+  503 in the envelope on reserve, logged-only on settle.
+
+### R5-3 — "The reservation can never under-count" was false (MEDIUM)
+- chars/4 estimated 190k CJK characters at 47.5k tokens. The estimate now
+  counts non-ASCII characters as full tokens plus per-message framing, and the
+  claim is corrected in the README.
+
+### R5-4 — Backup SDK retry turned a 429 into a 504 (MEDIUM)
+- The OpenAI SDK honours `Retry-After` up to 120 s, so it slept inside the
+  backup deadline. Backup retries now default to 0, like the primary.
+
+### R5-5 — A new real multi-process test exposed a startup race
+- **What happened:** adding the 4-process test the reviewer asked for (the old
+  "two processes" test used two connections in one process) showed workers
+  crashing with `database is locked` at startup in 2 of 5 runs.
+  `PRAGMA journal_mode=WAL` needs an exclusive lock and doesn't wait on
+  `busy_timeout`.
+- **Fix:** skip the switch when the file is already WAL; otherwise retry with
+  backoff. It now passes 10/10 runs.
+- **Prevention:** "concurrent" tests must use the real concurrency unit
+  (processes, here), not a stand-in.

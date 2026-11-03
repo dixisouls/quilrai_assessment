@@ -60,6 +60,14 @@ From review #3:
   5xx from a misconfigured server). Whether gateways should sanitise
   downstream error bodies should be one shared rule, decided with the user.
 
+## For Task 3 (gateway internals), from review #5
+
+- `_stream_body`'s `finally` (`events.aclose()` and the redaction audit) can
+  be re-cancelled on client disconnect, like the settlement was. Settlement
+  is now shielded; the upstream close and the audit event aren't.
+- `_retry_after_header` truncates with `int()`: an upstream `Retry-After: 4.9`
+  becomes `4` (early). It should round up.
+
 ## For Task 2: MCP security gateway
 
 From review #2:

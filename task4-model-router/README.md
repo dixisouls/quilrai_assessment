@@ -46,7 +46,7 @@ the primary's and backup's behaviour. All settings are in `.env.example`.
 | healthy primary (`mail a@b.io`) | 200 `You said: hello, mail [REDACTED]` | anthropic | 0.04 s |
 | primary 429 | 200 `Backup says: card [REDACTED]` | **openai** | 0.03 s |
 | primary hangs 6 s | 200 `Backup says: are you there` | **openai** | **3.01 s** |
-| both providers 429 | 429 `rate_limit_error`, `Retry-After: 4` | none | 4.0 s (backup's one SDK retry honoured `Retry-After`) |
+| both providers 429 | 429 `rate_limit_error`, backup's `Retry-After: 4` passed through | none | immediate (backup SDK retries are 0) |
 | primary 529 | 502 `provider_error`, **no failover** (see Decisions) | none | 0.002 s |
 
 Audit log for that session: `llm.failover` with `reason: rate_limited`, then
@@ -69,7 +69,7 @@ Run with `RUN_LIVE_TESTS=1`; it costs a fraction of a cent:
 | What triggers failover? | **Exactly** a primary 429 or the 3000 ms timeout | The brief names those two. Outages (5xx/529) and rejected requests return the standard error instead. Widening the set is a one-line change (`FAILOVER_ON`). |
 | What does "times out after 3000 ms" measure? | Time until the primary **answers**: its HTTP response begins (`Started`) | A model that is *thinking* before its first token has answered. Counting thinking time would fail over healthy requests. |
 | Fail over mid-answer? | **No** | The client may already have text. Switching providers would splice two different responses. The stream ends with the standard error event. |
-| Primary's SDK retries | **0** | Otherwise the SDK retries the 429 itself (with backoff) inside the 3 s budget, which delays failover. |
+| SDK retries (primary and backup) | **0** | A primary retry would sleep inside the 3 s budget and delay failover. A backup retry would sleep inside the backup deadline and turn the backup's 429 + `Retry-After` into a 504. |
 | Backup model | `gpt-6.1-sol` (your choice) | Checked with a 16-token streaming call before building on it. |
 | Default budget | 50,000 tokens/min per API key (the brief's example) | Override with `LLM_ROUTER_TOKENS_PER_MINUTE`. |
 
@@ -82,8 +82,11 @@ Run with `RUN_LIVE_TESTS=1`; it costs a fraction of a cent:
   There's no bucket edge where a tenant could spend 2× the limit across a
   boundary.
 - **Reserve, then settle.** Before calling a provider, the gateway reserves
-  the request's worst case: estimated prompt (~4 chars/token) plus
-  `max_tokens`. That can't under-count while the response is unknown. When
+  the request's worst case: estimated prompt plus `max_tokens`. The prompt
+  estimate counts ASCII at ~4 chars/token, every non-ASCII character as a
+  full token (CJK is often ~1 token per character), and 4 tokens of framing
+  per message. That is a near-upper bound for common text, not a guarantee
+  for every tokenizer. When
   the response ends, the row is rewritten to the provider's **real** usage
   (`Usage` from Anthropic's `message_start`/`message_delta`, or OpenAI's
   usage chunk). It becomes an estimate if no usage was reported, or **0** if
@@ -98,6 +101,14 @@ Run with `RUN_LIVE_TESTS=1`; it costs a fraction of a cent:
 - **Eviction.** Each check deletes that tenant's expired rows. A periodic
   global sweep clears tenants that went quiet, so the table holds about one
   window of rows.
+- **Settlement can't be lost.** It runs in its own task behind
+  `asyncio.shield`, so a client disconnecting mid-stream (Starlette cancels
+  the response body and re-cancels cleanup awaits) can't drop it, and its
+  errors are logged without touching the response. A limiter *error* on
+  admission (e.g. a locked database) fails closed with a 503.
+- **Concurrent startup.** Several workers opening the same file at once is
+  safe: the switch to WAL mode is retried with backoff (it needs an exclusive
+  lock and fails instantly under contention).
 - **Precise `Retry-After`:** the time until enough of the oldest rows expire
   (rounded up, never early). A request bigger than the whole budget gets an
   immediate **400** `request_exceeds_token_budget`, because waiting can never
@@ -128,6 +139,7 @@ Everything goes through Task 3's single OpenAI-shaped envelope plus
 | Both providers rate-limited | 429 + `Retry-After` | `rate_limit_error` |
 | Primary outage (no failover) / both down | 502 | `provider_error` |
 | Provider timed out | 504 | `provider_error` |
+| Rate limiter itself unavailable (e.g. database locked) | 503 (request denied) | `service_unavailable` |
 
 ## Tests
 
@@ -138,16 +150,17 @@ RUN_LIVE_TESTS=1 uv run pytest task4-model-router -m live      # real keys from 
 
 | Suite | Tests | What it proves |
 |---|---|---|
-| `test_ratelimit.py` | 17 | Sliding (not fixed) window; exact `Retry-After`; settle up and down, refund; tenant isolation; eviction incl. idle tenants; on-disk persistence across restart; **no over-admission under concurrency, also across two connections**; hostile tenant ids are just data |
+| `test_ratelimit.py` | 18 | Sliding (not fixed) window; exact `Retry-After`; settle up and down, refund; tenant isolation; eviction incl. idle tenants; on-disk persistence across restart; **no over-admission under concurrency: one connection, two connections, and 4 real processes**; hostile tenant ids are just data |
 | `test_router.py` | 12 | Healthy primary; 429 failover with audit; **timeout failover at the deadline with the primary cancelled**; answering just before the deadline is kept; no failover on other errors or mid-stream; both fail; backup timeout; early close; 20 concurrent mixed requests |
 | `test_openai_provider.py` | 5 | The real OpenAI SDK against the mock: event order, gateway-chosen model, `max_completion_tokens`, usage reporting, error mapping |
 | `test_router_e2e.py` | 8 (+2 live) | **Three real processes over real sockets**: all of the above end to end, including redaction on the backup path and the SQLite file |
 
 ## Known limitations
 
-- **Prompt-size estimate.** The reservation uses ~4 chars per token. It is
-  corrected at settlement, but a large `max_tokens` can be refused early
-  when the budget is nearly spent. That is intentionally conservative.
+- **Estimated reservations.** Reservations are estimates corrected at
+  settlement. An unusual tokenizer or input could still under-count one
+  request (over-spend is then bounded by the request body limit), and a large
+  `max_tokens` can be refused early when the budget is nearly spent.
 - **One backup.** No chain of providers or health-based routing.
 - **Wall-clock window.** Separate gateway processes sharing the SQLite file
   must have roughly synchronised clocks (normal NTP is fine).
