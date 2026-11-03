@@ -25,7 +25,8 @@ import math
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
-from typing import Any, Final
+from dataclasses import dataclass
+from typing import Any, Final, Protocol
 
 from pydantic import ValidationError
 from starlette.applications import Starlette
@@ -43,7 +44,15 @@ from quilr_common.log import (
 )
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
-from task3_pii_guardrail.providers import BlockEnd, Finish, Provider, ProviderError, ProviderEvent
+from task3_pii_guardrail.providers import (
+    BlockEnd,
+    Finish,
+    Provider,
+    ProviderError,
+    ProviderEvent,
+    Started,
+    Usage,
+)
 from task3_pii_guardrail.redactor import StreamRedactor, redact_counted
 
 log = get_logger(__name__)
@@ -88,13 +97,14 @@ def _error(
     request_id: str,
     *,
     param: str | None = None,
+    code: str | None = None,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     body = {
         "error": {
             "message": message,
             "type": kind,
-            "code": None,
+            "code": code,
             "param": param,
             "request_id": request_id,
         }
@@ -118,11 +128,90 @@ def _sse(obj: object) -> bytes:
     return f"data: {payload}\n\n".encode()
 
 
+class Limiter(Protocol):
+    """Token rate limiter (implemented by Task 4's ``TokenRateLimiter``).
+
+    ``reserve`` returns a decision object with ``allowed``, ``limit``,
+    ``remaining`` and ``retry_after_s`` attributes; ``settle`` replaces the
+    reservation with the tokens actually used.
+    """
+
+    async def reserve(self, tenant: str, tokens: int) -> Any: ...
+
+    async def settle(self, decision: Any, actual_tokens: int) -> None: ...
+
+
+@dataclass
+class _Accounting:
+    """Per-request bookkeeping: who served it, what it used, settled exactly once."""
+
+    limiter: Limiter | None
+    prompt_tokens: int
+    decision: Any = None
+    provider: str | None = None
+    model: str | None = None
+    usage: Usage | None = None
+    output_chars: int = 0
+    settled: bool = False
+
+    def headers(self) -> dict[str, str]:
+        out = {}
+        if self.decision is not None:
+            out["x-ratelimit-limit-tokens"] = str(self.decision.limit)
+            out["x-ratelimit-remaining-tokens"] = str(self.decision.remaining)
+        if self.provider is not None:
+            out["x-gateway-provider"] = self.provider
+        return out
+
+    async def settle(self) -> None:
+        if self.settled or self.limiter is None or self.decision is None:
+            return
+        self.settled = True
+        if self.usage is not None:  # the provider's own numbers
+            actual = self.usage.input_tokens + self.usage.output_tokens
+        elif self.provider is not None:  # served, but no usage reported: estimate
+            actual = self.prompt_tokens + math.ceil(self.output_chars / 4)
+        else:  # no provider ever served the request: refund
+            actual = 0
+        await self.limiter.settle(self.decision, actual)
+
+
+def _estimate_prompt_tokens(chat: ChatRequest) -> int:
+    # ~4 chars per token. Only used to size the reservation; settlement uses the
+    # provider's real usage.
+    return math.ceil(sum(len(m.content) for m in chat.messages) / 4)
+
+
+async def _observe(
+    events: AsyncGenerator[ProviderEvent, None], acct: _Accounting
+) -> AsyncGenerator[ProviderEvent, None]:
+    """Consume bookkeeping events (Started, Usage); pass content events through."""
+    try:
+        async for event in events:
+            if isinstance(event, Started):
+                acct.provider, acct.model = event.provider, event.model
+            elif isinstance(event, Usage):
+                acct.usage = event
+            else:
+                if isinstance(event, str):
+                    acct.output_chars += len(event)
+                yield event
+    finally:
+        await events.aclose()
+
+
 class _Gateway:
-    def __init__(self, settings: GatewaySettings, provider: Provider, model_name: str) -> None:
+    def __init__(
+        self,
+        settings: GatewaySettings,
+        provider: Provider,
+        model_name: str,
+        limiter: Limiter | None = None,
+    ) -> None:
         self._settings = settings
         self._provider = provider
         self._model_name = model_name
+        self._limiter = limiter
         self._keys = [k.get_secret_value().encode() for k in settings.api_keys]
 
     def _authenticate(self, header: str | None) -> str | None:
@@ -150,30 +239,80 @@ class _Gateway:
         chat = await self._parse(request, request_id)
         if isinstance(chat, Response):
             return chat
-        events = self._provider.stream(chat)
+        acct = _Accounting(self._limiter, _estimate_prompt_tokens(chat))
+        if self._limiter is not None:
+            worst_case = acct.prompt_tokens + (chat.max_tokens or self._settings.default_max_tokens)
+            decision = await self._limiter.reserve(principal, worst_case)
+            if not decision.allowed:
+                return self._limited(decision, request_id)
+            acct.decision = decision
+
+        events = _observe(self._provider.stream(chat), acct)
         try:
             first: ProviderEvent = await anext(events)
         except StopAsyncIteration:
             first = Finish("stop")
         except ProviderError as exc:
             await events.aclose()
+            await acct.settle()
             return _provider_error(exc, request_id)
         except Exception:
             await events.aclose()
+            await acct.settle()
             log.exception("provider failed before first event")
             return _error(500, "Internal error.", "internal_error", request_id)
 
         if chat.stream:
             return StreamingResponse(
-                self._stream(events, first, request_id, principal),
+                self._stream(events, first, request_id, principal, acct),
                 media_type="text/event-stream",
                 headers={
                     "x-request-id": request_id,
                     "cache-control": "no-cache",
                     "x-accel-buffering": "no",
+                    **acct.headers(),
                 },
             )
-        return await self._complete(events, first, request_id)
+        return await self._complete(events, first, request_id, acct)
+
+    @staticmethod
+    def _limited(decision: Any, request_id: str) -> JSONResponse:
+        headers = {
+            "x-ratelimit-limit-tokens": str(decision.limit),
+            "x-ratelimit-remaining-tokens": str(decision.remaining),
+        }
+        if decision.retry_after_s is None:
+            # Waiting can't help: this request alone exceeds the per-minute budget.
+            return _error(
+                400,
+                "This request needs more tokens than the per-minute budget allows. "
+                "Reduce max_tokens or the prompt.",
+                "invalid_request_error",
+                request_id,
+                param="max_tokens",
+                code="request_exceeds_token_budget",
+                headers=headers,
+            )
+        emit_audit(
+            AuditEvent(
+                action="llm.rate_limit",
+                decision=Decision.RATE_LIMITED,
+                reason="tenant token budget exhausted for the current window",
+                metadata={
+                    "limit": decision.limit,
+                    "retry_after_s": round(decision.retry_after_s, 1),
+                },
+            )
+        )
+        headers["retry-after"] = str(max(1, math.ceil(decision.retry_after_s)))
+        return _error(
+            429,
+            "Token rate limit exceeded for this API key. Retry later.",
+            "rate_limit_error",
+            request_id,
+            code="token_rate_limit_exceeded",
+            headers=headers,
+        )
 
     async def _parse(self, request: Request, request_id: str) -> ChatRequest | Response:
         body = await self._read_body(request)
@@ -204,14 +343,19 @@ class _Gateway:
         return b"".join(chunks)
 
     def _chunk(
-        self, completion_id: str, created: int, delta: dict[str, Any], finish: str | None
+        self,
+        completion_id: str,
+        created: int,
+        delta: dict[str, Any],
+        finish: str | None,
+        model: str | None = None,
     ) -> bytes:
         return _sse(
             {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": self._model_name,
+                "model": model or self._model_name,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }
         )
@@ -222,22 +366,32 @@ class _Gateway:
         first: ProviderEvent,
         request_id: str,
         principal: str,
+        acct: _Accounting,
     ) -> AsyncIterator[bytes]:
         # Starlette iterates this generator after the handler (and its bind_context)
         # has returned, so the log context is re-bound here for audit and errors.
         with bind_context(request_id=request_id, principal=principal):
-            async for chunk in self._stream_body(events, first, request_id):
-                yield chunk
+            try:
+                async for chunk in self._stream_body(events, first, request_id, acct.model):
+                    yield chunk
+            finally:
+                await acct.settle()  # also on client disconnect
 
     async def _stream_body(
-        self, events: AsyncGenerator[ProviderEvent, None], first: ProviderEvent, request_id: str
+        self,
+        events: AsyncGenerator[ProviderEvent, None],
+        first: ProviderEvent,
+        request_id: str,
+        model: str | None,
     ) -> AsyncIterator[bytes]:
         completion_id, created = f"chatcmpl-{uuid.uuid4().hex}", int(time.time())
         redactor = StreamRedactor()
         redactions = 0
         finish: Finish | None = None
         try:
-            yield self._chunk(completion_id, created, {"role": "assistant", "content": ""}, None)
+            yield self._chunk(
+                completion_id, created, {"role": "assistant", "content": ""}, None, model
+            )
             event: ProviderEvent | None = first
             while event is not None:
                 if isinstance(event, Finish):
@@ -246,15 +400,15 @@ class _Gateway:
                 if isinstance(event, BlockEnd):
                     # Each content block is redacted independently (see BlockEnd).
                     if tail := redactor.flush():
-                        yield self._chunk(completion_id, created, {"content": tail}, None)
+                        yield self._chunk(completion_id, created, {"content": tail}, None, model)
                     redactions += redactor.redactions
                     redactor = StreamRedactor()
-                elif safe := redactor.feed(event):
-                    yield self._chunk(completion_id, created, {"content": safe}, None)
+                elif isinstance(event, str) and (safe := redactor.feed(event)):
+                    yield self._chunk(completion_id, created, {"content": safe}, None, model)
                 event = await anext(events, None)
             if tail := redactor.flush():
-                yield self._chunk(completion_id, created, {"content": tail}, None)
-            yield self._chunk(completion_id, created, {}, (finish or Finish("stop")).reason)
+                yield self._chunk(completion_id, created, {"content": tail}, None, model)
+            yield self._chunk(completion_id, created, {}, (finish or Finish("stop")).reason, model)
         except ProviderError as exc:
             redactor.discard()
             log.warning(
@@ -273,7 +427,11 @@ class _Gateway:
         yield _sse("[DONE]")
 
     async def _complete(
-        self, events: AsyncGenerator[ProviderEvent, None], first: ProviderEvent, request_id: str
+        self,
+        events: AsyncGenerator[ProviderEvent, None],
+        first: ProviderEvent,
+        request_id: str,
+        acct: _Accounting,
     ) -> Response:
         blocks: list[list[str]] = [[]]
         finish = Finish("stop")
@@ -285,7 +443,7 @@ class _Gateway:
                     break
                 if isinstance(event, BlockEnd):
                     blocks.append([])
-                else:
+                elif isinstance(event, str):
                     blocks[-1].append(event)
                 event = await anext(events, None)
         except ProviderError as exc:
@@ -295,6 +453,7 @@ class _Gateway:
             return _error(500, "Internal error.", "internal_error", request_id)
         finally:
             await events.aclose()
+            await acct.settle()
         # Same rule as streaming: each content block is redacted independently.
         redacted = [redact_counted("".join(parts)) for parts in blocks]
         text = "".join(t for t, _ in redacted)
@@ -304,7 +463,7 @@ class _Gateway:
                 "id": f"chatcmpl-{uuid.uuid4().hex}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": self._model_name,
+                "model": acct.model or self._model_name,
                 "choices": [
                     {
                         "index": 0,
@@ -313,7 +472,7 @@ class _Gateway:
                     }
                 ],
             },
-            headers={"x-request-id": request_id},
+            headers={"x-request-id": request_id, **acct.headers()},
         )
 
     @staticmethod
@@ -338,9 +497,13 @@ async def _healthz(_request: Request) -> JSONResponse:
 
 
 def create_app(
-    settings: GatewaySettings, provider: Provider, *, model_name: str | None = None
+    settings: GatewaySettings,
+    provider: Provider,
+    *,
+    model_name: str | None = None,
+    limiter: Limiter | None = None,
 ) -> Starlette:
-    gateway = _Gateway(settings, provider, model_name or settings.model)
+    gateway = _Gateway(settings, provider, model_name or settings.model, limiter)
     app = Starlette(
         routes=[
             Route("/v1/chat/completions", gateway.chat_completions, methods=["POST"]),

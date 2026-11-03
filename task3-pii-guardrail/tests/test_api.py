@@ -17,7 +17,14 @@ from pydantic import ValidationError
 from task3_pii_guardrail.api import create_app
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
-from task3_pii_guardrail.providers import BlockEnd, Finish, ProviderError, ProviderEvent
+from task3_pii_guardrail.providers import (
+    BlockEnd,
+    Finish,
+    ProviderError,
+    ProviderEvent,
+    Started,
+    Usage,
+)
 
 API_KEY = secrets.token_urlsafe(24)  # generated per run; never a literal in the repo
 
@@ -366,3 +373,123 @@ def test_short_or_empty_configured_keys_are_refused() -> None:
         GatewaySettings(api_keys=[""])
     with pytest.raises(ValidationError):
         GatewaySettings(api_keys=["short"])
+
+
+# --- Task 4 integration: limiter hook and provider bookkeeping events ------------------
+
+
+@dataclass
+class FakeDecision:
+    allowed: bool
+    limit: int = 1000
+    remaining: int = 500
+    retry_after_s: float | None = None
+    reservation_id: int | None = 1
+
+
+@dataclass
+class FakeLimiter:
+    decision: FakeDecision = field(default_factory=lambda: FakeDecision(allowed=True))
+    reserved: list[tuple[str, int]] = field(default_factory=list)
+    settled: list[int] = field(default_factory=list)
+
+    async def reserve(self, tenant: str, tokens: int) -> FakeDecision:
+        self.reserved.append((tenant, tokens))
+        return self.decision
+
+    async def settle(self, decision: FakeDecision, actual_tokens: int) -> None:
+        self.settled.append(actual_tokens)
+
+
+@pytest.fixture
+async def limited(provider: FakeProvider) -> AsyncIterator[tuple[httpx.AsyncClient, FakeLimiter]]:
+    limiter = FakeLimiter()
+    app = create_app(
+        GatewaySettings(api_keys=[API_KEY], default_max_tokens=100), provider, limiter=limiter
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gw", timeout=10
+    ) as c:
+        yield c, limiter
+
+
+async def test_reservation_is_prompt_estimate_plus_max_tokens_then_settled_to_usage(
+    limited: tuple[httpx.AsyncClient, FakeLimiter], provider: FakeProvider
+) -> None:
+    client, limiter = limited
+    provider.script = [
+        Started("anthropic", "claude-opus-5-5"),
+        "Hi a@b.io",
+        Usage(12, 7),
+        Finish("stop"),
+    ]
+    body = _body(messages=[{"role": "user", "content": "x" * 40}], max_tokens=50)
+    resp = await client.post("/v1/chat/completions", json=body, headers=HEADERS)
+    assert resp.headers["x-ratelimit-limit-tokens"] == "1000"
+    assert resp.headers["x-ratelimit-remaining-tokens"] == "500"
+    assert _content(_sse_events(resp.text)) == "Hi [REDACTED]"  # bookkeeping events never leak
+    [(tenant, tokens)] = limiter.reserved
+    assert tenant.startswith("key-")
+    assert tokens == 40 // 4 + 50
+    assert limiter.settled == [19]  # 12 in + 7 out, the provider's real numbers
+
+
+async def test_over_budget_tenant_gets_429_before_any_provider_call(
+    limited: tuple[httpx.AsyncClient, FakeLimiter], provider: FakeProvider
+) -> None:
+    client, limiter = limited
+    limiter.decision = FakeDecision(
+        allowed=False, remaining=0, retry_after_s=12.3, reservation_id=None
+    )
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.status_code == 429
+    assert resp.headers["retry-after"] == "13"  # rounded up, never early
+    assert resp.headers["x-ratelimit-remaining-tokens"] == "0"
+    err = resp.json()["error"]
+    assert (err["type"], err["code"]) == ("rate_limit_error", "token_rate_limit_exceeded")
+    assert provider.requests == []
+    assert limiter.settled == []
+
+
+async def test_request_bigger_than_the_whole_budget_is_a_400(
+    limited: tuple[httpx.AsyncClient, FakeLimiter], provider: FakeProvider
+) -> None:
+    client, limiter = limited
+    limiter.decision = FakeDecision(
+        allowed=False, remaining=1000, retry_after_s=None, reservation_id=None
+    )
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "request_exceeds_token_budget"
+    assert provider.requests == []
+
+
+async def test_failed_request_is_refunded(
+    limited: tuple[httpx.AsyncClient, FakeLimiter], provider: FakeProvider
+) -> None:
+    client, limiter = limited
+    provider.script = [ProviderError("unavailable", "down")]
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.status_code == 502
+    assert limiter.settled == [0]
+
+
+async def test_usage_is_estimated_when_the_provider_reports_none(
+    limited: tuple[httpx.AsyncClient, FakeLimiter], provider: FakeProvider
+) -> None:
+    client, limiter = limited
+    provider.script = [Started("openai", "gpt-6.1-sol"), "x" * 40, Finish("stop")]
+    body = _body(stream=False, messages=[{"role": "user", "content": "y" * 20}])
+    resp = await client.post("/v1/chat/completions", json=body, headers=HEADERS)
+    assert resp.json()["model"] == "gpt-6.1-sol"  # reports the model that actually served
+    assert limiter.settled == [20 // 4 + 40 // 4]
+
+
+async def test_serving_provider_is_reported(
+    client: httpx.AsyncClient, provider: FakeProvider
+) -> None:
+    provider.script = [Started("openai", "gpt-6.1-sol"), "hello ", Finish("stop")]
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.headers["x-gateway-provider"] == "openai"
+    chunks = [e for e in _sse_events(resp.text) if isinstance(e, dict)]
+    assert {c["model"] for c in chunks} == {"gpt-6.1-sol"}

@@ -37,7 +37,26 @@ class BlockEnd:
     boundary checks."""
 
 
-type ProviderEvent = str | BlockEnd | Finish
+@dataclass(frozen=True, slots=True)
+class Started:
+    """The provider endpoint has answered (HTTP response received): it is serving
+    this request. Emitted once, before any text. A router measures its
+    primary-timeout against this event, so slow *thinking* before the first
+    text is not mistaken for an unresponsive endpoint."""
+
+    provider: str
+    model: str
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Token counts the provider reported for this request (for rate-limit settlement)."""
+
+    input_tokens: int
+    output_tokens: int
+
+
+type ProviderEvent = str | BlockEnd | Started | Usage | Finish
 
 
 class ProviderError(Exception):
@@ -164,16 +183,23 @@ class AnthropicProvider:
             raise _map_error(exc) from None
 
         stop_reason: str | None = None
+        input_tokens = output_tokens = 0
         try:
+            yield Started("anthropic", self._model)
             async for event in events:
                 if event.type == "content_block_delta" and event.delta.type == "text_delta":
                     yield event.delta.text
                 elif event.type == "content_block_stop":
                     yield BlockEnd()
-                elif event.type == "message_delta" and event.delta.stop_reason is not None:
-                    stop_reason = event.delta.stop_reason
+                elif event.type == "message_start":
+                    input_tokens = event.message.usage.input_tokens or 0
+                elif event.type == "message_delta":
+                    output_tokens = event.usage.output_tokens or output_tokens
+                    if event.delta.stop_reason is not None:
+                        stop_reason = event.delta.stop_reason
         except anthropic.APIError as exc:
             raise _map_error(exc) from None
         finally:
             await events.close()
+        yield Usage(input_tokens, output_tokens)
         yield Finish(_STOP_REASONS.get(stop_reason, "stop"))
