@@ -171,7 +171,7 @@ service. (This repo doesn't include deployment files.)
 uv run pytest common -q --cov=quilr_common --cov-branch
 ```
 
-139 tests:
+145 tests:
 - unit tests;
 - Hypothesis properties (generated emails never survive, redaction is
   idempotent);
@@ -179,8 +179,9 @@ uv run pytest common -q --cov=quilr_common --cov-branch
 - attacker-view tamper tests (full-rewrite forgery, algorithm downgrade,
   spliced records, wrong key);
 - a subprocess test proving stdout stays byte-empty;
-- 14 settings-loading tests: file vs environment precedence, the shared file,
-  typos, missing values, no echoed values.
+- 20 settings-loading tests: file vs environment precedence, the shared file,
+  typos, missing values, list values that are empty or not JSON, an
+  unreadable file, no echoed values.
 
 ## Known limitations
 

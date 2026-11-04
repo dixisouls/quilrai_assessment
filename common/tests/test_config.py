@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ class DemoSettings(BaseSettings):
 
     token: SecretStr = Field(min_length=16)
     port: int = Field(default=8000, ge=1, le=65535)
+    keys: list[SecretStr] = Field(default_factory=list)  # JSON in the environment, like API keys
 
 
 def _write_env(tmp_path: Path, text: str) -> Path:
@@ -38,7 +40,7 @@ def _write_env(tmp_path: Path, text: str) -> Path:
 
 @pytest.fixture(autouse=True)
 def _no_demo_vars_in_the_real_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("DEMO_TOKEN", "DEMO_PORT", "DEMO_PROT", "LOG_LEVEL", "APP_ENV"):
+    for name in ("DEMO_TOKEN", "DEMO_PORT", "DEMO_PROT", "DEMO_KEYS", "LOG_LEVEL", "APP_ENV"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -162,3 +164,40 @@ def test_config_error_exits_with_status_1_and_only_the_message() -> None:
     assert isinstance(err, SystemExit)
     assert str(err) == "configuration error: X: Field required"
     assert err.code == "configuration error: X: Field required"  # printed, exit status 1
+
+
+@pytest.mark.parametrize("value", ["", SECRET, "[unclosed", "'single-quoted inside'"])
+def test_list_values_that_are_not_json_are_named_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
+) -> None:
+    # The most likely mistake: a bare key instead of '["key"]', or an empty value.
+    _point_at(monkeypatch, _write_env(tmp_path, f"DEMO_TOKEN={SECRET}\nDEMO_KEYS={value}\n"))
+    with pytest.raises(ConfigError) as info:
+        load_settings(DemoSettings)
+    text = str(info.value)
+    assert text.startswith("configuration error: DEMO_KEYS: missing or not valid JSON")
+    assert SECRET not in text
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+def test_list_values_in_json_are_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = f"DEMO_TOKEN={SECRET}\nDEMO_KEYS='[\"{SECRET}\"]'\n"
+    _point_at(monkeypatch, _write_env(tmp_path, env))
+    [key] = load_settings(DemoSettings).keys
+    assert key.get_secret_value() == SECRET
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any file")
+def test_unreadable_env_file_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = _write_env(tmp_path, f"DEMO_TOKEN={SECRET}\n")
+    path.chmod(0)
+    try:
+        _point_at(monkeypatch, path)
+        with pytest.raises(ConfigError, match="cannot read the env file") as info:
+            load_settings(DemoSettings)
+        assert SECRET not in str(info.value)
+    finally:
+        path.chmod(0o600)

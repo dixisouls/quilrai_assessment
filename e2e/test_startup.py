@@ -69,6 +69,24 @@ def test_llm_gateway_names_typos_and_bad_values_without_echoing_them(tmp_path: P
     assert short_key not in result.stderr
 
 
+@pytest.mark.parametrize("value", ["", GOOD_CLIENT_KEY])
+def test_client_keys_that_are_empty_or_not_a_json_list_are_refused(
+    tmp_path: Path, value: str
+) -> None:
+    # An empty value (as in .env.example) or a bare key without '["..."]'.
+    result = _start(
+        "task4_model_router",
+        _env(
+            tmp_path,
+            f"LLM_GATEWAY_API_KEYS={value}",
+            "ANTHROPIC_API_KEY=mock-not-a-real-key",
+            "OPENAI_API_KEY=mock-not-a-real-key",
+        ),
+    )
+    _assert_refused(result, "LLM_GATEWAY_API_KEYS: missing or not valid JSON")
+    assert GOOD_CLIENT_KEY not in result.stderr
+
+
 @pytest.mark.parametrize("missing", ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
 def test_llm_gateway_requires_both_provider_keys(tmp_path: Path, missing: str) -> None:
     present = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"} - {missing}

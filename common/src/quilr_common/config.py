@@ -26,16 +26,20 @@ would otherwise be silently ignored.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
 from pydantic import Field, ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
 from quilr_common.log.settings import ServiceInfo
 
 ENV_FILE_VAR: Final = "QUILR_ENV_FILE"
 DEFAULT_ENV_FILE: Final = Path(".env")
+# pydantic-settings reports a value it couldn't decode as JSON (list and tuple
+# settings) as: error parsing value for field "<name>" from source "<source>".
+_UNPARSEABLE_FIELD: Final = re.compile(r'field "(\w+)"')
 
 
 class ConfigError(SystemExit):
@@ -77,6 +81,14 @@ def load_settings[S: BaseSettings](cls: type[S]) -> S:
         return cls(_env_file=path)
     except ValidationError as exc:
         raise ConfigError(_describe(cls, exc)) from None  # `from None`: the cause holds values
+    except SettingsError as exc:
+        # A list setting that is empty or not JSON (e.g. a bare key without ["..."]).
+        raise ConfigError(_describe_unparseable(cls, exc)) from None
+    except OSError as exc:
+        # The env file exists but can't be read (permissions, a directory, ...).
+        raise ConfigError(
+            f"configuration error: cannot read the env file: {exc.strerror}"
+        ) from None
 
 
 def _describe(cls: type[BaseSettings], exc: ValidationError) -> str:
@@ -86,6 +98,16 @@ def _describe(cls: type[BaseSettings], exc: ValidationError) -> str:
         field = ".".join(str(part) for part in err["loc"])
         problems.append(f"{prefix}{field}".upper() + f": {err['msg']}")
     return "configuration error: " + "; ".join(problems)
+
+
+def _describe_unparseable(cls: type[BaseSettings], exc: SettingsError) -> str:
+    prefix = str(cls.model_config.get("env_prefix") or "")
+    match = _UNPARSEABLE_FIELD.search(str(exc))
+    name = f"{prefix}{match.group(1)}".upper() if match else f"a {prefix}* setting"
+    return (
+        f"configuration error: {name}: missing or not valid JSON "
+        """(write a JSON list in single quotes, e.g. '["value"]')"""
+    )
 
 
 class AppSettings(BaseSettings):
