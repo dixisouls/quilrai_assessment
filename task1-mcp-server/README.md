@@ -15,6 +15,18 @@ A second entrypoint serves the same tools over MCP Streamable HTTP, so the MCP
 security gateway (Task 2) can sit in front of them. See
 [Design §8](#8-http-transport-for-the-gateway).
 
+## Requirements → implementation
+
+| Requirement (ASSESSMENT.md) | Where | Proven by |
+|---|---|---|
+| Runnable MCP server on the official SDK (`mcp`) | `server.py` (the SDK's low-level `Server`), `__main__.py` | `test_stdio_integration.py::test_full_session_over_raw_stdio`, `::test_official_sdk_client_interoperates` |
+| `get_customer_record`: `customer_id` formatted `CUST-XXXXX` | `models.py` (`GetCustomerRecordInput`), `service.py` | `test_models.py::test_valid_customer_ids`, `::test_invalid_customer_ids_are_rejected`, `::test_non_string_customer_ids_are_rejected` |
+| `trigger_refund`: `customer_id`, `amount` positive float, `reason` ≥ 10 characters | `models.py` (`TriggerRefundInput`), `service.py`, `store.py` | `test_models.py::test_invalid_amounts_are_rejected`, `::test_non_numeric_amounts_are_rejected_not_coerced`, `::test_invalid_reasons_are_rejected`, `::test_reason_of_exactly_ten_characters_is_accepted`; `test_service.py::test_refund_succeeds_and_reduces_balance` |
+| Strict schema validation with Pydantic | Strict models with `extra="forbid"`; the same models generate the advertised JSON Schemas | `test_models.py::test_published_schemas_are_strict`, `::test_refund_rejects_unknown_fields`, `::test_published_reason_pattern_agrees_with_the_validator` |
+| Reject invalid formats with standard JSON-RPC error codes | `-32602` with field details; `-32700` / `-32600` for undecodable lines (`transport.py`); `-32603` for crashes, with nothing internal | `test_service.py::test_invalid_arguments_raise_invalid_params`, `::test_unexpected_failure_is_internal_error_without_details`; `test_stdio_integration.py::test_malformed_messages_get_spec_errors_and_server_survives` |
+| stdio transport; stdout only JSON-RPC, logs only to stderr | `transport.py` (`reserve_stdout`), logging configured with `stdout_reserved=True`, `print` banned by ruff | `test_stdio_integration.py::test_internal_errors_do_not_leak_and_stdout_survives_stray_writes`, `::test_stdout_stays_clean_outside_the_session_window`; `e2e/test_startup.py::test_stdio_server_refuses_bad_config_and_keeps_stdout_clean` |
+| Edge cases for malformed input fields | Validation rules table below (Unicode digits, `NaN`, `"12"`, `true`, control and bidi characters, unknown fields) | `test_models.py` (82 cases), `test_service.py::test_invalid_params_data_never_echoes_input_values` |
+
 ## Run it
 
 ```bash
