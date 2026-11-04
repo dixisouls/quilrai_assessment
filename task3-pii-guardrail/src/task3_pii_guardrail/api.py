@@ -53,6 +53,7 @@ from task3_pii_guardrail.providers import (
     ProviderEvent,
     Started,
     Usage,
+    close_shielded,
 )
 from task3_pii_guardrail.redactor import StreamRedactor, redact_counted
 
@@ -89,7 +90,8 @@ def _retry_after_header(value: float | None) -> dict[str, str] | None:
     # Defence in depth: providers already sanitise, but never let a bad value 500.
     if value is None or not math.isfinite(value) or not 0 <= value <= 3600:  # noqa: PLR2004
         return None
-    return {"retry-after": str(int(value))}
+    # Round up: the header is whole seconds, and 4.9 s sent as "4" makes clients retry early.
+    return {"retry-after": str(math.ceil(value))}
 
 
 def _error(
@@ -231,7 +233,7 @@ async def _observe(
                     acct.output_chars += len(event)
                 yield event
     finally:
-        await events.aclose()
+        await close_shielded(events.aclose)
 
 
 class _Gateway:
@@ -283,11 +285,11 @@ class _Gateway:
         except StopAsyncIteration:
             first = Finish("stop")
         except ProviderError as exc:
-            await events.aclose()
+            await close_shielded(events.aclose)
             await acct.settle()
             return _provider_error(exc, request_id)
         except Exception:
-            await events.aclose()
+            await close_shielded(events.aclose)
             await acct.settle()
             log.exception("provider failed before first event")
             return _error(500, "Internal error.", "internal_error", request_id)
@@ -482,8 +484,11 @@ class _Gateway:
             log.exception("gateway failed mid-stream")
             yield _sse({"error": _error_body("Internal error.", "internal_error", request_id)})
         finally:
-            await events.aclose()  # also runs when the client disconnects
+            # Audit first: it is synchronous, so a cancelled close can't skip it.
             self._audit(redactions + redactor.redactions)
+            await close_shielded(
+                events.aclose
+            )  # shielded: also completes when the client disconnects
         yield _sse("[DONE]")
 
     async def _complete(
@@ -512,7 +517,7 @@ class _Gateway:
             log.exception("provider failed while collecting a non-streaming response")
             return _error(500, "Internal error.", "internal_error", request_id)
         finally:
-            await events.aclose()
+            await close_shielded(events.aclose)
             await acct.settle()
         # Same rule as streaming: each content block is redacted independently.
         redacted = [redact_counted("".join(parts)) for parts in blocks]

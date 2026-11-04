@@ -1,7 +1,10 @@
-"""Gateway configuration (``LLM_GATEWAY_*`` environment variables).
+"""Gateway configuration: ``LLM_GATEWAY_*`` variables plus ``ANTHROPIC_API_KEY``.
 
-The Anthropic key is read from ``ANTHROPIC_API_KEY`` by the SDK's own
-credential resolution; it is never stored in these settings.
+Entrypoints load both with :func:`quilr_common.config.load_settings`, so they
+come from the environment or the ``.env`` file. The provider key is its own
+settings class: it is required at startup (a missing key stops the process
+with a clear message, instead of failing on the first request), and it is
+passed to the SDK explicitly.
 """
 
 from __future__ import annotations
@@ -13,7 +16,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class GatewaySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="LLM_GATEWAY_", extra="forbid", frozen=True)
+    model_config = SettingsConfigDict(
+        env_prefix="LLM_GATEWAY_", extra="forbid", frozen=True, dotenv_filtering="match_prefix"
+    )
 
     # Client API keys accepted by the gateway (JSON list in the environment).
     api_keys: list[Annotated[SecretStr, Field(min_length=16)]] = Field(min_length=1)
@@ -28,3 +33,17 @@ class GatewaySettings(BaseSettings):
     max_body_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
     host: str = "127.0.0.1"
     port: int = Field(default=8090, ge=1, le=65535)
+
+
+class AnthropicCredentials(BaseSettings):
+    """``ANTHROPIC_API_KEY``, required.
+
+    ``extra="ignore"`` with ``only_existing``: other ``ANTHROPIC_*`` variables
+    belong to Anthropic's tooling, not to this gateway, so they aren't policed here.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="ANTHROPIC_", extra="ignore", frozen=True, dotenv_filtering="only_existing"
+    )
+
+    api_key: SecretStr = Field(min_length=1)

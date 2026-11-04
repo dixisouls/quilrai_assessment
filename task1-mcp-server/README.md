@@ -8,15 +8,26 @@ tools:
 | `get_customer_record` | `customer_id`: `CUST-XXXXX` | Read-only lookup |
 | `trigger_refund` | `customer_id`, `amount` (positive number), `reason` (≥ 10 chars) | Moves money; not idempotent |
 
-It speaks JSON-RPC over **stdio**. **stdout carries only JSON-RPC messages**,
-and every log line goes to stderr as structured JSON.
+It speaks JSON-RPC over **stdio**, as the brief asks. **stdout carries only
+JSON-RPC messages**, and every log line goes to stderr as structured JSON.
+
+A second entrypoint serves the same tools over MCP Streamable HTTP, so the MCP
+security gateway (Task 2) can sit in front of them. See
+[Design §8](#8-http-transport-for-the-gateway).
 
 ## Run it
 
 ```bash
 uv sync
-uv run python -m task1_mcp_server        # or: uv run task1-mcp-server
+uv run python -m task1_mcp_server              # stdio (the brief). Or: uv run task1-mcp-server
+uv run python -m task1_mcp_server.serve_http   # HTTP on 127.0.0.1:8000/mcp, for the gateway
 ```
+
+Configuration is optional here: `LOG_*` and `APP_ENV` (both modes), and
+`MCP_SERVER_HOST` / `MCP_SERVER_PORT` (HTTP mode). Each service reads them from
+`.env` in the directory it starts in, or from the environment; see
+`.env.example`. A bad value stops the server with a message on stderr, so
+stdout stays JSON-RPC only even then.
 
 Register it with any MCP client (Claude Desktop, Claude Code, the SDK client):
 
@@ -171,6 +182,30 @@ only 10 of 30 (`MISTAKES.md` R2-1).
   client process, inside the user's trust boundary; per-user authorization
   belongs in the gateway (Task 2).
 
+### 8. HTTP transport for the gateway
+
+The brief's transport is stdio, and that's still the main way to run the
+server. Task 2's gateway, though, is an HTTP reverse proxy, so to put the
+gateway in front of *these* tools (not just a mock), `serve_http.py` serves
+the same `CustomerToolService` over MCP Streamable HTTP with the SDK's
+`streamable_http_app`:
+
+```
+agent ──► MCP gateway (Task 2: JWT, RBAC) ──► Task 1 over HTTP ──► same service and validation
+```
+
+- **Same behaviour.** Validation, `-32602` details, `isError` refusals,
+  `-32603` sanitising and audit events all live in the service, so both
+  transports answer identically. The root `e2e/` suite checks this through
+  the gateway.
+- **No authentication of its own**, deliberately. Only the gateway should
+  reach it, so it binds to loopback by default. There, the SDK also checks
+  `Host`/`Origin` headers against DNS rebinding.
+- **Stdio-only hardening doesn't apply.** Stdout reservation and
+  drain-before-exit protect a pipe. Over HTTP each reply is its own response,
+  and malformed JSON-RPC is answered by the gateway (which parses first) or by
+  the SDK's HTTP layer.
+
 ## Code layout
 
 ```
@@ -181,7 +216,8 @@ src/task1_mcp_server/
   service.py    tool catalogue, dispatch, error mapping, audit, logging
   server.py     wires the service into the SDK's low-level Server
   transport.py  stdout reservation, drain-before-exit, -32700/-32600/-32602 replies
-  __main__.py   entry point: logging first, then serve
+  __main__.py   stdio entry point: logging first, then reserve stdout, then serve
+  serve_http.py HTTP entry point (Streamable HTTP), for use behind the MCP gateway
 ```
 
 ## Tests
@@ -190,8 +226,9 @@ src/task1_mcp_server/
 uv run pytest task1-mcp-server -q
 ```
 
-129 tests; total branch coverage is 98.9%, with the spawned server processes
-measured too:
+129 tests, with the spawned server processes measured for coverage too. The
+HTTP entrypoint and its configuration are tested end to end, through the
+gateway, by the root `e2e/` suite.
 
 | Suite | What it proves |
 |---|---|
@@ -220,6 +257,12 @@ measured too:
 - **Import-time writes.** Anything written to stdout while Python imports the
   modules, before `run()` reserves stdout, isn't covered. Nothing in this
   codebase does that.
-- **Line length.** The SDK's stdin reader doesn't bound line length. That's
-  acceptable for a local child process; a network-facing deployment sits
-  behind a gateway with body-size limits (Task 2).
+- **Line length and stderr back-pressure.** The SDK's stdin reader doesn't
+  bound line length, and if the client never reads the server's stderr, log
+  writes eventually block once the pipe fills. Both are acceptable for a
+  local child process whose client manages its pipes. A network-facing
+  deployment uses the HTTP mode behind the gateway, which limits body size.
+- **HTTP mode has no authentication.** It relies on being reachable only by
+  the gateway (loopback by default). If it's bound to another interface, the
+  network must enforce that, because the SDK's DNS-rebinding checks are on
+  only for loopback hosts.

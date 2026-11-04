@@ -1,16 +1,19 @@
 [project]
 name = "task1-mcp-server"
 version = "0.1.0"
-description = "Task 1: MCP server (stdio) exposing customer tools with strict input validation"
+description = "Task 1: MCP server (stdio, plus HTTP for the gateway) exposing customer tools with strict input validation"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "quilr-common",
     "mcp>=2.3,<3",
     "pydantic>=2.14,<3",
+    "pydantic-settings>=2.16.2,<3",  # MCP_SERVER_* / LOG_* settings from env and .env
+    "uvicorn>=0.54,<1",              # serves the HTTP transport (serve_http)
 ]
 
 [project.scripts]
 task1-mcp-server = "task1_mcp_server.__main__:main"
+task1-mcp-server-http = "task1_mcp_server.serve_http:main"
 
 [tool.uv.sources]
 quilr-common = { workspace = true }

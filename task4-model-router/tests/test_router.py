@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
+import anyio
 import pytest
 
 from task3_pii_guardrail.models import ChatRequest
@@ -168,3 +169,36 @@ async def test_concurrent_requests_fail_over_independently() -> None:
 def test_timeouts_must_be_positive() -> None:
     with pytest.raises(ValueError, match="timeout"):
         FailoverProvider(FakeProvider("a"), FakeProvider("b"), primary_timeout_s=0)
+
+
+class SlowCloseProvider:
+    """A serving provider whose cleanup takes two awaits (like closing an HTTP response)."""
+
+    def __init__(self) -> None:
+        self.closed: list[str] = []
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[ProviderEvent, None]:
+        try:
+            yield Started("anthropic", "anthropic-model")
+            yield "text"
+            yield Finish("stop")
+        finally:
+            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.01)
+            self.closed.append("closed")
+
+
+async def test_serving_stream_is_closed_even_inside_a_cancelled_scope() -> None:
+    # A client disconnect: Starlette closes the body inside a cancelled anyio scope,
+    # which cancels every await in cleanup. The router's close is shielded, so the
+    # serving provider's stream is still closed instead of abandoned.
+    primary = SlowCloseProvider()
+    router = FailoverProvider(
+        primary, FakeProvider("openai"), primary_timeout_s=1.0, secondary_timeout_s=1.0
+    )
+    stream = router.stream(REQUEST)
+    assert await anext(stream) == Started("anthropic", "anthropic-model")
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await stream.aclose()
+    assert primary.closed == ["closed"]

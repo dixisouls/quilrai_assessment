@@ -26,7 +26,9 @@ class LoggingSettings(BaseSettings):
     protocol traffic such as stdio MCP, and audit records are fsynced.
     """
 
-    model_config = SettingsConfigDict(env_prefix="LOG_", extra="forbid", frozen=True)
+    model_config = SettingsConfigDict(
+        env_prefix="LOG_", extra="forbid", frozen=True, dotenv_filtering="match_prefix"
+    )
 
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     format: Literal["json", "console"] = "json"

@@ -18,6 +18,7 @@ dev = [
     "mypy>=2.4,<3",
     "pip-audit>=2.10,<3",
     "pre-commit>=4.7,<5",
+    "python-dotenv>=1.2,<2",  # conftest.py: live tests read only the two provider keys from .env
 ]
 
 [tool.uv]
@@ -41,7 +42,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = [
     "common/tests", "scripts/tests", "task1-mcp-server/tests", "task2-mcp-gateway/tests",
-    "task3-pii-guardrail/tests", "task4-model-router/tests",
+    "task3-pii-guardrail/tests", "task4-model-router/tests", "e2e",
 ]
 pythonpath = ["scripts"]
 markers = [
@@ -86,6 +87,7 @@ known-first-party = [
 # TRY301: tests raise inside try on purpose to exercise exception logging.
 # PLR0917: pytest injects fixtures positionally; parametrized tests need several.
 "**/tests/**" = ["S101", "PLR2004", "S105", "S106", "TRY301", "PLR0917"]
+"e2e/**" = ["S101", "PLR2004", "S105", "S106", "TRY301", "PLR0917"]
 
 [tool.mypy]
 strict = true
@@ -95,6 +97,7 @@ files = [
     "task2-mcp-gateway/src", "task2-mcp-gateway/tests",
     "task3-pii-guardrail/src", "task3-pii-guardrail/tests",
     "task4-model-router/src", "task4-model-router/tests",
+    "e2e",
 ]
 mypy_path = "common/src:task1-mcp-server/src:task2-mcp-gateway/src:task3-pii-guardrail/src:task4-model-router/src:scripts"
 explicit_package_bases = true

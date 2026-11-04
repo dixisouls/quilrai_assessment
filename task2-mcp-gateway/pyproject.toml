@@ -10,7 +10,7 @@ dependencies = [
     "httpx>=0.28,<1",           # async client with streaming and explicit timeouts
     "pyjwt[crypto]>=2.15,<3",   # JWT verification (RS256/ES256 via cryptography)
     "pydantic>=2.14,<3",
-    "pydantic-settings>=2.16,<3",
+    "pydantic-settings>=2.16.2,<3",
     "mcp>=2.3,<3",              # only for the mock downstream server and SDK-client tests
 ]
 

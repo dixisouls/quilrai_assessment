@@ -1107,6 +1107,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 
@@ -1128,6 +1129,7 @@ dev = [
     { name = "pytest", specifier = ">=9.2,<10" },
     { name = "pytest-asyncio", specifier = ">=1.4,<2" },
     { name = "pytest-cov", specifier = ">=7.1,<8" },
+    { name = "python-dotenv", specifier = ">=1.2,<2" },
     { name = "ruff", specifier = ">=0.17,<0.18" },
 ]
 
@@ -1143,7 +1145,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pydantic", specifier = ">=2.14,<3" },
-    { name = "pydantic-settings", specifier = ">=2.16,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16.2,<3" },
 ]
 
 [[package]]
@@ -1299,14 +1301,18 @@ source = { editable = "task1-mcp-server" }
 dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
     { name = "quilr-common" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "pydantic", specifier = ">=2.14,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16.2,<3" },
     { name = "quilr-common", editable = "common" },
+    { name = "uvicorn", specifier = ">=0.54,<1" },
 ]
 
 [[package]]
@@ -1329,7 +1335,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "pydantic", specifier = ">=2.14,<3" },
-    { name = "pydantic-settings", specifier = ">=2.16,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16.2,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15,<3" },
     { name = "quilr-common", editable = "common" },
     { name = "starlette", specifier = ">=1.10,<2" },
@@ -1342,6 +1348,7 @@ version = "0.1.0"
 source = { editable = "task3-pii-guardrail" }
 dependencies = [
     { name = "anthropic" },
+    { name = "anyio" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "quilr-common" },
@@ -1352,8 +1359,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=2.3,<3" },
+    { name = "anyio", specifier = ">=4.15,<5" },
     { name = "pydantic", specifier = ">=2.14,<3" },
-    { name = "pydantic-settings", specifier = ">=2.16,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16.2,<3" },
     { name = "quilr-common", editable = "common" },
     { name = "starlette", specifier = ">=1.10,<2" },
     { name = "uvicorn", specifier = ">=0.54,<1" },
@@ -1364,6 +1372,7 @@ name = "task4-model-router"
 version = "0.1.0"
 source = { editable = "task4-model-router" }
 dependencies = [
+    { name = "anyio" },
     { name = "httpx2" },
     { name = "openai" },
     { name = "pydantic" },
@@ -1376,10 +1385,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.15,<5" },
     { name = "httpx2", specifier = ">=2.16,<3" },
     { name = "openai", specifier = ">=3.44,<4" },
     { name = "pydantic", specifier = ">=2.14,<3" },
-    { name = "pydantic-settings", specifier = ">=2.16,<3" },
+    { name = "pydantic-settings", specifier = ">=2.16.2,<3" },
     { name = "quilr-common", editable = "common" },
     { name = "starlette", specifier = ">=1.10,<2" },
     { name = "task3-pii-guardrail", editable = "task3-pii-guardrail" },

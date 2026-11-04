@@ -4,34 +4,34 @@
     (Anthropic primary, OpenAI backup) -> streaming PII redaction (Task 3)
 
 Configuration: ``LLM_GATEWAY_*`` (Task 3), ``LLM_ROUTER_*`` (this task),
-``ANTHROPIC_API_KEY`` and ``OPENAI_API_KEY``. See ``.env.example``.
+``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY`` and ``LOG_*``, from the environment
+or the ``.env`` file (see ``.env.example``). The process refuses to start if a
+required value is missing or invalid.
 """
 
 from __future__ import annotations
 
-import os
-
 import uvicorn
 
-from quilr_common.log import LoggingSettings, ServiceInfo, configure_logging, get_logger
+from quilr_common.config import load_settings, service_info
+from quilr_common.log import LoggingSettings, configure_logging, get_logger
 from task3_pii_guardrail.api import create_app
-from task3_pii_guardrail.config import GatewaySettings
+from task3_pii_guardrail.config import AnthropicCredentials, GatewaySettings
 from task3_pii_guardrail.providers import AnthropicProvider
-from task4_model_router.config import RouterSettings
+from task4_model_router.config import OpenAICredentials, RouterSettings
 from task4_model_router.openai_provider import OpenAIProvider
 from task4_model_router.ratelimit import TokenRateLimiter
 from task4_model_router.router import FailoverProvider
 
 
 def main() -> None:
-    configure_logging(
-        ServiceInfo(name="llm-gateway", version="0.2.0", env=os.environ.get("APP_ENV", "dev")),
-        LoggingSettings(),
-    )
-    gateway = GatewaySettings()  # LLM_GATEWAY_* from the environment
-    router = RouterSettings()  # LLM_ROUTER_* from the environment
+    configure_logging(service_info("llm-gateway", "0.2.0"), load_settings(LoggingSettings))
+    gateway = load_settings(GatewaySettings)
+    router = load_settings(RouterSettings)
+    anthropic_key = load_settings(AnthropicCredentials).api_key.get_secret_value()
+    openai_key = load_settings(OpenAICredentials).api_key.get_secret_value()
     primary = AnthropicProvider(
-        api_key=None,  # SDK reads ANTHROPIC_API_KEY
+        api_key=anthropic_key,
         model=gateway.model,
         default_max_tokens=gateway.default_max_tokens,
         timeout_s=gateway.provider_timeout_s,
@@ -40,7 +40,7 @@ def main() -> None:
         refusal_fallback=gateway.refusal_fallback,
     )
     backup = OpenAIProvider(
-        api_key=None,  # SDK reads OPENAI_API_KEY
+        api_key=openai_key,
         model=router.openai_model,
         default_max_tokens=gateway.default_max_tokens,
         timeout_s=router.backup_timeout_s,

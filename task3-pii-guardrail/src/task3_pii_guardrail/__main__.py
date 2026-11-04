@@ -1,29 +1,27 @@
 """Entry point: ``python -m task3_pii_guardrail``.
 
-Configuration: ``LLM_GATEWAY_*`` (see ``.env.example``) and
-``ANTHROPIC_API_KEY``, which the Anthropic SDK reads itself.
+Configuration: ``LLM_GATEWAY_*``, ``ANTHROPIC_API_KEY`` and ``LOG_*``, from the
+environment or the ``.env`` file (see ``.env.example``). The process refuses
+to start if a required value is missing or invalid.
 """
 
 from __future__ import annotations
 
-import os
-
 import uvicorn
 
-from quilr_common.log import LoggingSettings, ServiceInfo, configure_logging, get_logger
+from quilr_common.config import load_settings, service_info
+from quilr_common.log import LoggingSettings, configure_logging, get_logger
 from task3_pii_guardrail.api import create_app
-from task3_pii_guardrail.config import GatewaySettings
+from task3_pii_guardrail.config import AnthropicCredentials, GatewaySettings
 from task3_pii_guardrail.providers import AnthropicProvider
 
 
 def main() -> None:
-    configure_logging(
-        ServiceInfo(name="llm-gateway", version="0.1.0", env=os.environ.get("APP_ENV", "dev")),
-        LoggingSettings(),
-    )
-    settings = GatewaySettings()  # values come from LLM_GATEWAY_* environment variables
+    configure_logging(service_info("llm-gateway", "0.1.0"), load_settings(LoggingSettings))
+    settings = load_settings(GatewaySettings)
+    credentials = load_settings(AnthropicCredentials)
     provider = AnthropicProvider(
-        api_key=None,  # resolved by the SDK from ANTHROPIC_API_KEY
+        api_key=credentials.api_key.get_secret_value(),
         model=settings.model,
         default_max_tokens=settings.default_max_tokens,
         timeout_s=settings.provider_timeout_s,

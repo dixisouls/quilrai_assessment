@@ -5,7 +5,7 @@ description = "Shared foundations: structured JSON logging, redaction, tamper-ev
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "pydantic>=2.14,<3",
-    "pydantic-settings>=2.16,<3",
+    "pydantic-settings>=2.16.2,<3",
 ]
 
 [build-system]

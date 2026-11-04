@@ -8,16 +8,34 @@ with a coarse ``kind``; provider-specific detail stays in the server log.
 from __future__ import annotations
 
 import math
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 
 import anthropic
+import anyio
 
 from quilr_common.log import get_logger
 from task3_pii_guardrail.models import ChatRequest
 
 log = get_logger(__name__)
+
+CLOSE_TIMEOUT_S: Final = 5.0  # upper bound on any single cleanup close
+
+
+async def close_shielded(close: Callable[[], Awaitable[object]]) -> None:
+    """Run a cleanup ``close()`` to completion, even while the task is being cancelled.
+
+    When a client disconnects, Starlette cancels the response body through an
+    anyio cancel scope, which cancels *every* ``await`` in cleanup code again,
+    not just the first. A plain ``await stream.close()`` in a ``finally`` is
+    then interrupted, and the HTTP request to the provider is abandoned instead
+    of closed. The shielded scope lets the close finish, and the timeout keeps a
+    stuck close from holding the task.
+    """
+    with anyio.move_on_after(CLOSE_TIMEOUT_S, shield=True):
+        await close()
+
 
 FinishReason = Literal["stop", "length", "content_filter"]
 ProviderFailure = Literal["rate_limited", "unavailable", "timeout", "bad_request"]
@@ -200,6 +218,6 @@ class AnthropicProvider:
         except anthropic.APIError as exc:
             raise _map_error(exc) from None
         finally:
-            await events.close()
+            await close_shielded(events.close)
         yield Usage(input_tokens, output_tokens)
         yield Finish(_STOP_REASONS.get(stop_reason, "stop"))

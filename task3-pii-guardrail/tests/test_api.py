@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import secrets
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from pydantic import ValidationError
 
+import task3_pii_guardrail.providers as providers_mod
 from task3_pii_guardrail.api import _Accounting, create_app
 from task3_pii_guardrail.config import GatewaySettings
 from task3_pii_guardrail.models import ChatRequest
@@ -25,6 +28,7 @@ from task3_pii_guardrail.providers import (
     ProviderEvent,
     Started,
     Usage,
+    close_shielded,
 )
 
 API_KEY = secrets.token_urlsafe(24)  # generated per run; never a literal in the repo
@@ -586,3 +590,122 @@ async def test_reservation_estimate_does_not_undercount_common_text(
     )
     [(_, reserved)] = limiter.reserved
     assert reserved - 1 >= minimum  # minus max_tokens
+
+
+# --- Backlog fixes: Retry-After rounding, cleanup on client disconnect --------------------
+
+
+@pytest.mark.parametrize(("upstream", "sent"), [(4.2, "5"), (0.5, "1"), (3.0, "3"), (0.0, "0")])
+async def test_retry_after_is_rounded_up_never_early(
+    client: httpx.AsyncClient, provider: FakeProvider, upstream: float, sent: str
+) -> None:
+    provider.script = [ProviderError("rate_limited", "x", retry_after=upstream)]
+    resp = await client.post("/v1/chat/completions", json=_body(), headers=HEADERS)
+    assert resp.status_code == 429
+    assert resp.headers["retry-after"] == sent
+
+
+async def _slow_close(done: list[str]) -> None:
+    await asyncio.sleep(0.01)  # e.g. closing the provider's HTTP response
+    await asyncio.sleep(0.01)  # a second await: anyio cancels this one again too
+    done.append("closed")
+
+
+async def test_close_shielded_completes_under_anyio_cancellation() -> None:
+    plain: list[str] = []
+    shielded: list[str] = []
+
+    async def victim(done: list[str], *, shield: bool) -> None:
+        try:
+            await asyncio.sleep(10)
+        finally:
+            if shield:
+                await close_shielded(lambda: _slow_close(done))
+            else:
+                await _slow_close(done)
+
+    for done, shield in ((plain, False), (shielded, True)):
+        async with anyio.create_task_group() as tg:  # how Starlette cancels a response body
+            tg.start_soon(functools.partial(victim, done, shield=shield))
+            await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+    assert plain == []  # the problem: an unshielded close is abandoned
+    assert shielded == ["closed"]
+
+
+async def test_close_shielded_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(providers_mod, "CLOSE_TIMEOUT_S", 0.05)
+
+    async def stuck() -> None:
+        await asyncio.sleep(3600)
+
+    with anyio.fail_after(5):
+        await close_shielded(stuck)  # gives up after CLOSE_TIMEOUT_S instead of hanging
+
+
+@dataclass
+class HangingProvider:
+    """Sends one sentence, then waits for a token that never comes (like a slow model)."""
+
+    closed: list[str] = field(default_factory=list)
+
+    async def stream(self, request: ChatRequest) -> AsyncGenerator[ProviderEvent, None]:
+        try:
+            yield Started("fake", "fake-model")
+            yield "SSN 123-45-6789 is on file. "
+            await asyncio.sleep(30)
+            yield "never sent"
+        finally:
+            await close_shielded(lambda: _slow_close(self.closed))
+
+
+async def test_client_disconnect_mid_stream_still_closes_audits_and_settles(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider = HangingProvider()
+    limiter = FakeLimiter()
+    app = create_app(GatewaySettings(api_keys=[API_KEY]), provider, limiter=limiter)
+    body = json.dumps(_body()).encode()
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},  # spec 2.0: Starlette watches for http.disconnect
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"authorization", f"Bearer {API_KEY}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("gw", 80),
+    }
+    pending = [{"type": "http.request", "body": body, "more_body": False}]
+    left = anyio.Event()
+    sent: list[bytes] = []
+
+    async def receive() -> dict[str, Any]:
+        if pending:
+            return pending.pop(0)
+        await left.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        if message["type"] == "http.response.body":
+            sent.append(message.get("body", b""))
+            if b"[REDACTED]" in message.get("body", b""):
+                left.set()  # the client goes away while the model is still "thinking"
+
+    with caplog.at_level(logging.INFO), anyio.fail_after(10):
+        await app(scope, receive, send)
+
+    assert any(b"[REDACTED]" in chunk for chunk in sent)
+    assert not any(b"123-45-6789" in chunk for chunk in sent)
+    assert provider.closed == ["closed"]  # the provider stream was closed, not abandoned
+    audits = [getattr(r, "audit", None) for r in caplog.records]
+    assert [a["action"] for a in audits if a] == ["llm.response_redaction"]
+    assert len(limiter.settled) == 1  # the reservation was settled

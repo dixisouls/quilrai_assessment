@@ -10,11 +10,11 @@ guard can't tell them apart and refuses to start.
 from __future__ import annotations
 
 import contextlib
-import os
 
 import anyio
 
-from quilr_common.log import LoggingSettings, ServiceInfo, configure_logging, get_logger
+from quilr_common.config import load_settings, service_info
+from quilr_common.log import LoggingSettings, configure_logging, get_logger
 from task1_mcp_server.server import SERVER_NAME, SERVER_VERSION, build_server
 from task1_mcp_server.service import CustomerToolService
 from task1_mcp_server.store import CustomerStore, seeded_store
@@ -23,8 +23,8 @@ from task1_mcp_server.transport import reserve_stdout, serve_stdio
 
 def run(store: CustomerStore | None = None) -> None:
     configure_logging(
-        ServiceInfo(name=SERVER_NAME, version=SERVER_VERSION, env=os.environ.get("APP_ENV", "dev")),
-        LoggingSettings(),
+        service_info(SERVER_NAME, SERVER_VERSION),
+        load_settings(LoggingSettings),  # LOG_* from the environment or .env
         stdout_reserved=True,
     )
     wire = reserve_stdout()

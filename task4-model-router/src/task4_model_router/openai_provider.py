@@ -22,6 +22,7 @@ from task3_pii_guardrail.providers import (
     ProviderEvent,
     Started,
     Usage,
+    close_shielded,
     parse_retry_after,
 )
 
@@ -100,7 +101,7 @@ class OpenAIProvider:
         except openai.APIError as exc:
             raise _map_error(exc) from None
         finally:
-            await chunks.close()
+            await close_shielded(chunks.close)
         if usage is not None:
             yield usage
         yield Finish(_FINISH.get(finish, "stop"))

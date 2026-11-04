@@ -85,9 +85,10 @@ Format: **what happened → root cause → fix → prevention.**
 A fresh reviewer agent with no shared context reviewed the foundations and CI.
 It raised 18 findings (3 HIGH, 7 MEDIUM, 8 LOW), each with a reproduction. The
 tooling findings are fixed on `chore/ci-setup`. The 13 shared-library
-findings are **not fixed yet**: they are deferred and assigned in
-`BACKLOG.md`. (A fix branch was started out of order, without the user's
-go-ahead, and then discarded; see R3.)
+findings were deferred and tracked in a backlog file. The ones still open are
+now listed under Known limitations in `common/README.md`, and the backlog file
+was removed on the final branch. (A fix branch was started out of order,
+without the user's go-ahead, and then discarded; see R3.)
 
 ### R1 — Commit checker treated history `#` lines as comments and ignored `git commit -v`
 - **What happened:** in `--range` mode, a header such as `#42 fix …` was
@@ -118,8 +119,9 @@ go-ahead, and then discarded; see R3.)
   next.
 - **Root cause:** I ordered work by the severity of the findings rather than by
   the agreed plan, and didn't ask first.
-- **Fix:** the branch was discarded unmerged. The findings are recorded in
-  `BACKLOG.md` and assigned to the task where they belong.
+- **Fix:** the branch was discarded unmerged. The findings were recorded in a
+  backlog file and assigned to the task where they belong. They now live
+  under Known limitations in `common/README.md`.
 - **Prevention:** finish the agreed step, report, and ask before starting
   anything outside it.
 
@@ -182,7 +184,8 @@ go-ahead, and then discarded; see R3.)
 A fresh reviewer in an isolated worktree, scoped to Task 1, raised 8 in-scope
 findings (1 HIGH, 3 MEDIUM, 4 LOW) and 2 out-of-scope notes, all with
 reproductions. All 8 are fixed or explicitly documented. The out-of-scope
-notes are in `BACKLOG.md`.
+notes are now Known limitations in `task1-mcp-server/README.md` and
+`common/README.md`.
 
 ### R2-1 — Committed refunds lost their replies when stdin closed (HIGH)
 - **What happened:** if a client wrote its requests and closed stdin at once,
@@ -275,7 +278,8 @@ notes are in `BACKLOG.md`.
 A fresh reviewer in an isolated worktree attacked the gateway and a real MCP
 server as live processes. **No authorization bypass was found.** It raised 6
 in-scope findings (3 MEDIUM, 3 LOW), all now fixed with regression tests, and
-1 out-of-scope note (in `BACKLOG.md`).
+1 out-of-scope note (downstream error bodies relayed verbatim). That note was
+fixed on the final branch (F2).
 
 ### R3-1 — Three inputs crashed the gateway with a bare 500 (MEDIUM)
 - **What happened:** a JOSE header with a numeric `kid` or a `crit` entry
@@ -459,7 +463,8 @@ accounting or failover bypass**:
 - window boundaries were exact.
 
 It raised 5 in-scope findings (2 HIGH, 2 MEDIUM, 1 LOW), all fixed with
-regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
+regression tests. Two out-of-scope Task 3 notes were deferred and fixed on the
+final branch (F3).
 
 ### R5-1 — Settlement could be lost on client disconnect (HIGH)
 - **What happened:** my `finally: await acct.settle()` carried the comment
@@ -498,3 +503,121 @@ regression tests. Two out-of-scope Task 3 notes went to `BACKLOG.md`.
   backoff. It now passes 10/10 runs.
 - **Prevention:** "concurrent" tests must use the real concurrency unit
   (processes, here), not a stand-in.
+
+## Final integration branch (`chore/final-integration`)
+
+### F1 — Nothing read `.env`; I first defended it instead of seeing the gap
+- **What happened:** `.env.example` documented every setting, but no service
+  loaded `.env`. Settings came only from the process environment, and the
+  READMEs said to run `set -a && source .env` first. The user asked how it
+  could work with only two keys in `.env`. I explained the defaults and
+  called that standard practice, instead of seeing the real problem: a
+  service started without sourcing would silently ignore the file.
+- **Root cause:** I treated "pydantic-settings reads environment variables"
+  as if it meant "the service reads `.env`". I never started a service from
+  a clean shell with only the file to configure it.
+- **Fix:** `quilr_common.config.load_settings()` loads `.env` in every
+  entrypoint. One shared file works for every service, and each one rejects
+  misspelled names with its own prefix. Provider keys are now required
+  settings, and errors name the variable without echoing its value. The new
+  `e2e/` suite starts every service with *only* a `.env` file as
+  configuration, and a test checks that a non-default budget from the file
+  takes effect.
+- **Prevention:** a documented configuration path counts as working only
+  once a test exercises it end to end, from a clean environment.
+
+### F1a — Design trap avoided: `env_file` on the settings classes
+- Setting `env_file=".env"` in each `model_config` was the obvious one-line
+  fix. But every test that builds a settings object directly would then
+  silently read the developer's `.env`, so test results would depend on the
+  machine. I also checked the installed pydantic-settings: with
+  `extra="forbid"`, a shared file fails on every other service's variables,
+  unless `dotenv_filtering="match_prefix"` is set. Only entrypoints read the
+  file now, and the root `conftest.py` turns it off for spawned test servers.
+
+### F2 — The MCP gateway relayed downstream error bodies (review #3 note)
+- **What happened:** any downstream HTTP error streamed back unchanged:
+  stack traces, HTML pages from a proxy, and the MCP SDK's own 400s, which
+  contain raw pydantic output echoing the rejected input.
+- **Fix:** a downstream 4xx is relayed only if it is a well-formed JSON-RPC
+  error. Its status and code are kept (clients act on 404 and 405), and the
+  message is replaced with the gateway's standard text. Everything else
+  becomes `502` / `-32002`. Tests cover a traceback, an HTML page, real SDK
+  validation text, oversize bodies and malformed bodies.
+
+### F3 — Cleanup could be cut off on client disconnect (review #5 notes)
+- **What happened:** the reviewer flagged that the gateway's
+  `finally: await events.aclose()` could be re-cancelled. Before fixing, I
+  measured instead of assuming. Plain asyncio cancellation lets a two-step
+  close finish; anyio cancellation (what Starlette uses on disconnect) cuts
+  it off. Starlette 1.10 cancels while the body waits for the provider, so
+  the cleanup that actually gets cut off runs inside the **providers'**
+  `finally` blocks, not only the gateway's.
+- **Fix:** `close_shielded()` (`anyio.move_on_after(5 s, shield=True)`) at
+  every close point: both providers, the router and the gateway. The
+  redaction audit event now runs before any await. `Retry-After` is rounded
+  up instead of truncated. A test sends a real ASGI `http.disconnect`
+  mid-stream and checks the provider close, the audit event and the
+  settlement.
+- **Prevention:** before fixing a reported race, reproduce which path is
+  actually hit; the fix belongs where the cancellation lands.
+
+### F4 — Smaller slips
+- **Commit title.** A commit title was 73 characters; the commit-msg hook
+  refused it.
+- **mypy.** mypy refused a second module named `conftest`, so the root
+  `conftest.py` is left out of mypy's file list.
+- **Stale README count.** The Task 3 README still said 36 API tests after
+  Task 4, review #5 and this branch had brought the count to 57. READMEs now
+  take test counts from the source.
+- **Wrong commit.** A file deleted with `git rm` was already staged, and a
+  later `git add` naming it failed. The deletion went into the next commit
+  (`.env.example`). Nothing had been pushed, so the docs commits were rebuilt
+  with a soft reset, one group per commit. An extra trailing newline in this
+  file was then caught by the end-of-file hook. Prevention: check
+  `git status` right before each commit, not only before the first.
+
+## Independent review #6 (branch `chore/final-integration`)
+
+A fresh reviewer in an isolated worktree found **no security bypass and no
+secret leak**: every configuration error it tried kept values out of the
+output, and all tests passed. It raised 10 findings, all introduced by this
+branch: 3 MEDIUM, now fixed with regression tests, and 7 LOW, which await the
+user's decision. It also noted one pre-existing item outside this branch: the
+gateway's HTTP client honours `HTTP(S)_PROXY`.
+
+### R6-1 — Downstream redirect bodies were still relayed verbatim (MEDIUM)
+- **What happened:** the F2 fix checked `response.is_error` (4xx and 5xx), so
+  a 3xx went down the success path with its body. A proxy's redirect page
+  naming an internal host reached the client. The README said "anything that
+  isn't a JSON-RPC error → 502", which was false.
+- **Root cause:** I equated "not an error status" with "success" and tested
+  only 4xx and 5xx.
+- **Fix:** anything that isn't 2xx is rebuilt, and only a 4xx can keep its
+  status. The tests add 302, 307, a 308 carrying a JSON-RPC body, and a 307
+  on GET.
+- **Prevention:** when a fix is a filter, test the full input range
+  (1xx–5xx here), not just the cases the bug report names.
+
+### R6-2 — A malformed list value gave a raw traceback (MEDIUM)
+- **What happened:** `LLM_GATEWAY_API_KEYS=mykey` (no `["..."]`) or an empty
+  value crashed with a pydantic-settings `SettingsError` traceback, not the
+  promised one-line message. It still failed closed and no value leaked. An
+  unreadable env file gave a `PermissionError` traceback.
+- **Root cause:** I caught only `ValidationError`. JSON decoding of list
+  settings happens earlier, in the settings source, and raises a different
+  type.
+- **Fix:** `load_settings` also maps `SettingsError` to
+  `<VARIABLE>: missing or not valid JSON` and `OSError` to "cannot read the
+  env file", both with `from None`. There are unit tests (empty, bare, broken
+  and quoted values; an unreadable file) and an e2e startup test.
+
+### R6-3 — `.env.example` shipped a client key that worked (MEDIUM)
+- **What happened:** the placeholder `replace-with-a-random-client-key` is 32
+  characters, so it passed validation. Copying the example and filling in
+  only the provider keys gave a gateway that accepts a key published in the
+  repo: fail open.
+- **Fix:** the value is empty, so the gateway refuses to start until a real
+  key is set (R6-2 makes that refusal a clear message). An e2e test starts
+  the gateway with exactly that empty value.
+- **Prevention:** a placeholder for a secret must never pass validation.
