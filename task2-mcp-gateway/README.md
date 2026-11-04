@@ -144,7 +144,7 @@ every response.
 | Viewer calls `admin_*` | 200 | **`-32001` Unauthorized Tool Call** |
 | Downstream unreachable / timed out | 502 / 504 | `-32002`, no hostnames or error text |
 | Downstream answers 4xx with a JSON-RPC error | Same 4xx | Same code, **the gateway's** standard message |
-| Downstream answers 5xx, or anything that isn't a JSON-RPC error | 502 | `-32002` "Downstream error" |
+| Downstream answers 3xx or 5xx, or a 4xx that isn't a JSON-RPC error | 502 | `-32002` "Downstream error" |
 | Unknown path / HTTP method (incl. HEAD, OPTIONS) | 404 / 405 | `-32600` |
 | Any unexpected error in the gateway | 500 | `-32603`; the traceback only in the log |
 
@@ -154,8 +154,9 @@ naming its proxy, or (the MCP SDK's own 400s) raw pydantic output that echoes
 the rejected input. The gateway relays a downstream 4xx only if it's a
 well-formed JSON-RPC error. It then keeps the status and code, because MCP
 clients act on them (404 → start a new session; 405 on GET → no server
-stream), but replaces the message with its own standard text. Everything else
-becomes `502` / `-32002`. Downstream's status and body size are logged
+stream), but replaces the message with its own standard text. Everything else,
+including redirects (never followed, and their pages can name internal
+hosts), becomes `502` / `-32002`. Downstream's status and body size are logged
 against the `request_id`; the body isn't. Successful responses (JSON or SSE)
 still stream through untouched.
 
@@ -188,7 +189,7 @@ uv run pytest task2-mcp-gateway -q
 |---|---|---|
 | `test_auth.py` | 45 | Token parsing, `alg:none`, algorithm confusion, wrong key, tampering, expiry, `nbf`, issuer/audience, exact role values, JWKS `kid` selection, hostile `kid`/`crit` headers |
 | `test_policy.py` | 67 | The brief's rules; bypass attempts (case, whitespace, full-width, header mismatch including base64-encoded headers, duplicate keys, batches); method allowlist; pathological nesting, surrogates, `1e400` |
-| `test_proxy.py` | 51 | The HTTP layer against a **recording fake downstream**: denied requests produce zero downstream calls; header stripping; re-serialised body; SSE streaming; 401/413/415; sanitised 502/504; enveloped 404/405/500; **downstream error bodies (tracebacks, HTML, SDK validation text, oversize, malformed) never relayed**, while the 4xx statuses clients act on are kept |
+| `test_proxy.py` | 55 | The HTTP layer against a **recording fake downstream**: denied requests produce zero downstream calls; header stripping; re-serialised body; SSE streaming; 401/413/415; sanitised 502/504; enveloped 404/405/500; **downstream error and redirect bodies (tracebacks, HTML, redirect pages, SDK validation text, oversize, malformed) never relayed**, while the 4xx statuses clients act on are kept |
 | `test_devtokens.py` | 3 | Key file permissions (0600); minted tokens verify |
 | `test_integration.py` | 5 | **Real processes on real sockets**: gateway in front of the SDK-based MCP server; denials never executed (checked in the downstream log); the official SDK client works through the gateway |
 | `e2e/` (repo root) | | The gateway in front of **Task 1's real tools**, configured only by a `.env` file; startup refuses bad configuration |

@@ -15,8 +15,8 @@ caller can't make the gateway buffer or parse anything:
 5. Forward the *re-serialised* message to the configured downstream URL and
    stream its response back (JSON or SSE). Failures become sanitised 502/504
    responses carrying ``-32002``.
-6. A downstream *error* response (HTTP 4xx/5xx) is never relayed verbatim; see
-   :func:`_sanitise_downstream_error`.
+6. A downstream response that isn't a success (any non-2xx: 3xx, 4xx, 5xx) is
+   never relayed verbatim; see :func:`_sanitise_downstream_error`.
 
 Headers cross the gateway only from an explicit allowlist in each direction.
 The client's ``Authorization`` never reaches downstream, and downstream's
@@ -286,7 +286,7 @@ class _Gateway:
                 502, DOWNSTREAM_UNAVAILABLE, "Downstream unavailable", request_id, rpc_id=rpc_id
             )
 
-        if response.is_error:  # 4xx or 5xx
+        if not response.is_success:  # 3xx, 4xx or 5xx (redirects are never followed)
             return await _sanitise_downstream_error(response, rpc_id, request_id)
         out = {k: v for k, v in response.headers.items() if k.lower() in _RETURN_RESPONSE}
         out["x-request-id"] = request_id
@@ -330,15 +330,17 @@ def _jsonrpc_error_code(body: bytes | None) -> int | None:
 async def _sanitise_downstream_error(
     response: httpx.Response, rpc_id: JsonRpcId | None, request_id: str
 ) -> Response:
-    """Turn a downstream HTTP error into the gateway's own envelope.
+    """Turn a downstream non-2xx response into the gateway's own envelope.
 
     * **4xx with a JSON-RPC error body** (the MCP SDK's transport errors, such
       as an unknown session or a bad ``Accept`` header): the status and the
       JSON-RPC code are kept, because MCP clients act on them. For example, a
       404 tells a client to start a new session. The message is the gateway's
       standard text for that code, never downstream's.
-    * **Anything else** (5xx, a non-JSON body, an HTML error page from a
+    * **Anything else** (3xx, 5xx, a non-JSON body, an HTML error page from a
       misconfigured server, or a body over 64 KiB): ``502`` with ``-32002``.
+      A redirect is never followed (it could move traffic off the configured
+      host), and its body can name internal hosts.
       The cause is downstream, not the client, and its text may expose
       internals such as stack traces, hostnames or library names.
 
@@ -352,7 +354,7 @@ async def _sanitise_downstream_error(
         body = None
     finally:
         await response.aclose()
-    code = None if response.is_server_error else _jsonrpc_error_code(body)
+    code = _jsonrpc_error_code(body) if response.is_client_error else None
     log.warning(
         "downstream returned an error",
         extra={

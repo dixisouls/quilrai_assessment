@@ -384,6 +384,11 @@ def _rpc_error(code: object, message: str = "x") -> bytes:
         # A 4xx that isn't JSON-RPC means downstream is misconfigured, not the client.
         (404, b"<html>Not Found: /srv/mcp/routes.py</html>", "text/html"),
         (400, b"x" * (64 * 1024 + 1), _JSON),  # oversize: never buffered, never relayed
+        # Redirects are never followed, and their pages can name internal hosts.
+        (302, b"<html>Moved: see http://db.internal:9000/srv/mcp (nginx)</html>", "text/html"),
+        (307, b"<html>Moved: see http://db.internal:9000/srv/mcp (nginx)</html>", "text/html"),
+        # A redirect is replaced even when its body is a well-formed JSON-RPC error.
+        (308, _rpc_error(-32600, "moved to /srv/mcp on db.internal"), _JSON),
     ],
 )
 async def test_downstream_error_bodies_are_never_relayed(
@@ -560,3 +565,18 @@ async def test_unknown_paths_are_404_with_envelope_and_no_redirect(
         resp = await client.post(path, json=_rpc("tools/list"))
         assert resp.status_code == 404, path
         assert resp.json()["error"]["data"]["request_id"] == resp.headers["x-request-id"]
+
+
+async def test_downstream_redirect_on_get_is_not_relayed(
+    client: httpx.AsyncClient, downstream: RecordingDownstream, mint: Minter
+) -> None:
+    downstream.behaviour = lambda _r: httpx.Response(
+        307,
+        headers={"location": "http://db.internal:9000/mcp", "content-type": "text/html"},
+        content=b"<html>Moved to db.internal</html>",
+    )
+    resp = await client.get("/mcp", headers={"authorization": f"Bearer {mint()}"})
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == -32002
+    assert "location" not in resp.headers
+    assert "db.internal" not in resp.text
