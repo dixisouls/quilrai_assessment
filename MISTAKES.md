@@ -576,3 +576,48 @@ final branch (F3).
   with a soft reset, one group per commit. An extra trailing newline in this
   file was then caught by the end-of-file hook. Prevention: check
   `git status` right before each commit, not only before the first.
+
+## Independent review #6 (branch `chore/final-integration`)
+
+A fresh reviewer in an isolated worktree found **no security bypass and no
+secret leak**: every configuration error it tried kept values out of the
+output, and all tests passed. It raised 10 findings, all introduced by this
+branch: 3 MEDIUM, now fixed with regression tests, and 7 LOW, which await the
+user's decision. It also noted one pre-existing item outside this branch: the
+gateway's HTTP client honours `HTTP(S)_PROXY`.
+
+### R6-1 — Downstream redirect bodies were still relayed verbatim (MEDIUM)
+- **What happened:** the F2 fix checked `response.is_error` (4xx and 5xx), so
+  a 3xx went down the success path with its body. A proxy's redirect page
+  naming an internal host reached the client. The README said "anything that
+  isn't a JSON-RPC error → 502", which was false.
+- **Root cause:** I equated "not an error status" with "success" and tested
+  only 4xx and 5xx.
+- **Fix:** anything that isn't 2xx is rebuilt, and only a 4xx can keep its
+  status. The tests add 302, 307, a 308 carrying a JSON-RPC body, and a 307
+  on GET.
+- **Prevention:** when a fix is a filter, test the full input range
+  (1xx–5xx here), not just the cases the bug report names.
+
+### R6-2 — A malformed list value gave a raw traceback (MEDIUM)
+- **What happened:** `LLM_GATEWAY_API_KEYS=mykey` (no `["..."]`) or an empty
+  value crashed with a pydantic-settings `SettingsError` traceback, not the
+  promised one-line message. It still failed closed and no value leaked. An
+  unreadable env file gave a `PermissionError` traceback.
+- **Root cause:** I caught only `ValidationError`. JSON decoding of list
+  settings happens earlier, in the settings source, and raises a different
+  type.
+- **Fix:** `load_settings` also maps `SettingsError` to
+  `<VARIABLE>: missing or not valid JSON` and `OSError` to "cannot read the
+  env file", both with `from None`. There are unit tests (empty, bare, broken
+  and quoted values; an unreadable file) and an e2e startup test.
+
+### R6-3 — `.env.example` shipped a client key that worked (MEDIUM)
+- **What happened:** the placeholder `replace-with-a-random-client-key` is 32
+  characters, so it passed validation. Copying the example and filling in
+  only the provider keys gave a gateway that accepts a key published in the
+  repo: fail open.
+- **Fix:** the value is empty, so the gateway refuses to start until a real
+  key is set (R6-2 makes that refusal a clear message). An e2e test starts
+  the gateway with exactly that empty value.
+- **Prevention:** a placeholder for a secret must never pass validation.
