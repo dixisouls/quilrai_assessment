@@ -156,6 +156,46 @@ Everything goes through Task 3's single OpenAI-shaped envelope plus
 | Provider timed out | 504 | `provider_error` |
 | Rate limiter itself unavailable (e.g. database locked) | 503 (request denied) | `service_unavailable` |
 
+## Security considerations
+
+- **Fail closed.** If the rate limiter itself fails (e.g. a locked database),
+  the request is denied with `503 service_unavailable` and an `ERROR` audit
+  event. Nothing is admitted without a reservation. A request larger than the
+  whole budget is refused up front (`400`), not queued.
+- **No internals in errors.** Every refusal uses the standard envelope with a
+  `request_id`. Provider error bodies, SDK messages, hostnames, SQL and stack
+  traces stay in the log. When both providers fail, the client sees only the
+  coarse kind (`rate_limit_error`, `provider_error`) and `Retry-After`,
+  rounded up.
+- **Deliberately exposed.** `x-gateway-provider` (`anthropic` or `openai`)
+  tells the client which provider served the answer, and
+  `x-ratelimit-limit-tokens` / `x-ratelimit-remaining-tokens` show its own
+  budget. Both are information the caller can act on, and neither reveals
+  another tenant's usage.
+- **Tenant identity is not the key.** Usage is stored under
+  `key-<first 12 hex of SHA-256(api key)>`, so the SQLite file never holds a
+  client key. Every query is parameterised, and a test stores SQL-shaped and
+  hostile tenant ids as plain data (`test_hostile_tenant_ids_are_just_data`).
+  Token counts are checked `>= 0` by the schema.
+- **Atomic accounting.** Check-and-insert runs in one `BEGIN IMMEDIATE`
+  transaction, so concurrent requests and separate processes can't
+  over-admit (tested with 100 concurrent requests and 4 real processes).
+- **Provider keys.** `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` are required
+  secret settings, loaded at startup and passed to the SDKs explicitly. They
+  never appear in logs, errors or `repr`, and a missing key stops the gateway
+  instead of failing the first failover.
+- **No SSRF, no wasted retries.** Provider URLs come only from configuration,
+  never from a request. SDK retries are always 0 for the primary and 0 by
+  default for the backup (`LLM_ROUTER_BACKUP_MAX_RETRIES`), so neither
+  provider retries behind the router's back.
+- **Bounded waiting.** The primary gets 3000 ms to answer, and the backup has
+  its own deadline. The losing request is cancelled, and every provider
+  stream is closed even if the client disconnects (`close_shielded`).
+- **Audit.** Every failover (`llm.failover`, with the reason), every
+  rate-limit refusal (`llm.rate_limit`) and every limiter outage emits a
+  structured audit event, with the request id and the hashed principal and
+  never the prompt.
+
 ## Tests
 
 ```bash
